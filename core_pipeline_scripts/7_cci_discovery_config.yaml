@@ -1,0 +1,99 @@
+# =============================================================================
+# CCI Comorbidity Discovery Config
+# =============================================================================
+# Each CCI category has a diagdesc_regex that searches the HUMAN-READABLE
+# diagnosis description column (diagdesc) in MediClaims.
+#
+# Script 7 scans all MediClaims years and outputs unique diagdesc + diagcode
+# pairs that match these patterns, for manual curation.
+#
+# Regex notes:
+#   - All patterns are case-insensitive (wrapped in (?i) by the script)
+#   - Use \b for word boundaries to avoid partial matches
+#   - Use | for OR logic within a category
+# =============================================================================
+
+# Which column in MediClaims holds the diagnosis description?
+diagdesc_column: "diagdesc"
+
+# Which column holds the ICD code?
+diagcode_column: "diagcode"
+
+# Output format: "tsv" or "csv"
+output_format: "tsv"
+
+cci_categories:
+  # ─── Cardiovascular ───────────────────────────────────────────────
+  Myocardial_Infarction:
+    diagdesc_regex: "myocardial infarction|heart attack|\\bstemi\\b|\\bnstemi\\b|\\bami\\b|transmural infarct|subendocardial infarct"
+    cci_weight: 1
+
+  Congestive_Heart_Failure:
+    diagdesc_regex: "heart failure|cardiac failure|\\bchf\\b|cardiomyopathy|ventricular failure|pulmonary (edema|oedema)"
+    cci_weight: 1
+
+  Peripheral_Vascular_Disease:
+    diagdesc_regex: "peripheral vascular|peripheral arter|\\bpvd\\b|claudication|aortic aneurysm|arterial embolism|gangrene"
+    cci_weight: 1
+
+  Cerebrovascular_Disease:
+    diagdesc_regex: "cerebrovascular|\\bstroke\\b|cerebral infarct|\\btia\\b|transient isch(a)?emic|intracranial h(a)?emorrhage|subarachnoid"
+    cci_weight: 1
+
+  # ─── Respiratory ──────────────────────────────────────────────────
+  Chronic_Pulmonary_Disease:
+    diagdesc_regex: "\\bcopd\\b|chronic obstructive|emphysema|chronic bronchitis|\\basthma\\b|bronchiectasis|pulmonary fibrosis"
+    cci_weight: 1
+
+  # ─── Metabolic / Endocrine ────────────────────────────────────────
+  Diabetes_Uncomplicated:
+    diagdesc_regex: "diabetes mellitus(?!.*(nephropathy|retinopathy|neuropathy|ketoacidosis|coma|gangrene|ulcer|foot|renal|kidney))|\\bdm\\b(?!.*(nephro|retino|neuro))|type (1|2|i|ii) diabetes"
+    cci_weight: 1
+
+  Diabetes_Complicated:
+    diagdesc_regex: "diabet.*(nephropathy|retinopathy|neuropathy|ketoacidosis|coma|gangrene|ulcer|foot|renal|kidney)|diabetic (nephro|retino|neuro|foot|kidney)"
+    cci_weight: 2
+
+  # ─── Neurological ─────────────────────────────────────────────────
+  Dementia:
+    diagdesc_regex: "\\bdementia\\b|alzheimer|senile|cognitive impairment|lewy body|vascular dementia"
+    cci_weight: 1
+
+  Paraplegia_Hemiplegia:
+    diagdesc_regex: "paraplegia|hemiplegia|quadriplegia|tetraplegia|paralysis|spinal cord (injury|lesion)"
+    cci_weight: 2
+
+  # ─── Renal / Liver / GI ──────────────────────────────────────────
+  Renal_Disease:
+    diagdesc_regex: "renal (failure|insufficiency|disease)|\\bckd\\b|chronic kidney|nephritis|nephrotic|\\besrd\\b|end.stage renal|dialysis|kidney transplant"
+    cci_weight: 2
+
+  Liver_Disease_Mild:
+    diagdesc_regex: "hepatitis (b|c)|chronic hepatitis|fatty liver|\\bnafld\\b|\\bnash\\b|cirrhosis(?!.*(varic|ascit|hepatorenal|encephalopathy))|liver fibrosis"
+    cci_weight: 1
+
+  Liver_Disease_Severe:
+    diagdesc_regex: "hepatic (failure|encephalopathy|coma)|liver (failure|decompensation)|portal hypertension|variceal|\\bascites\\b|hepatorenal"
+    cci_weight: 3
+
+  Peptic_Ulcer_Disease:
+    diagdesc_regex: "peptic ulcer|gastric ulcer|duodenal ulcer|stomach ulcer|gastrointestinal (ulcer|bleed)"
+    cci_weight: 1
+
+  # ─── Immune / Inflammatory ───────────────────────────────────────
+  Rheumatic_Disease:
+    diagdesc_regex: "rheumatoid arthritis|\\bsle\\b|lupus|systemic sclerosis|scleroderma|polymyositis|dermatomyositis|vasculitis"
+    cci_weight: 1
+
+  AIDS_HIV:
+    diagdesc_regex: "\\bhiv\\b|\\baids\\b|human immunodeficiency|acquired immunodeficiency"
+    cci_weight: 6
+
+  # ─── Malignancy ──────────────────────────────────────────────────
+  Malignancy_Any:
+    diagdesc_regex: "\\bcarcinoma\\b|\\bcancer\\b|\\bmalignant\\b|\\bneoplasm\\b|\\blymphoma\\b|\\bleuk(a)?emia\\b|\\bmyeloma\\b|\\bmelanoma\\b|\\bsarcoma\\b|\\btumour\\b|\\btumor\\b"
+    cci_weight: 2
+
+  Metastatic_Solid_Tumor:
+    diagdesc_regex: "metasta(sis|tic|ses)|secondary (malignant|neoplasm|carcinoma|deposit)|spread.*(cancer|carcinoma|malignant)"
+    cci_weight: 6

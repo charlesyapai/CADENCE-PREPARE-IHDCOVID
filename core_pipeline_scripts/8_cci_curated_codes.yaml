@@ -1,0 +1,58 @@
+# =============================================================================
+# CCI Curated Codes
+# =============================================================================
+# Two modes:
+#
+#   read_from_tsv: true
+#     Step 8 reads the _candidates.tsv files from Step 7 output directly
+#     (after you've deleted irrelevant rows). It auto-fills this file and
+#     flips the flag to false.
+#
+#   read_from_tsv: false
+#     Step 8 reads the entries already in this file (populated from a
+#     previous run or manual paste).
+#
+# Workflow:
+#   1. Run Step 7 -> review the _candidates.tsv files in Step 7 output
+#   2. Delete rows that are NOT relevant from each TSV
+#   3. Set read_from_tsv: true (below)
+#   4. Run Step 8 -> auto-reads TSVs, populates this file, generates master list
+# =============================================================================
+
+read_from_tsv: true
+
+cci_curated:
+  Myocardial_Infarction:
+    entries: []
+  Congestive_Heart_Failure:
+    entries: []
+  Peripheral_Vascular_Disease:
+    entries: []
+  Cerebrovascular_Disease:
+    entries: []
+  Chronic_Pulmonary_Disease:
+    entries: []
+  Diabetes_Uncomplicated:
+    entries: []
+  Diabetes_Complicated:
+    entries: []
+  Dementia:
+    entries: []
+  Paraplegia_Hemiplegia:
+    entries: []
+  Renal_Disease:
+    entries: []
+  Liver_Disease_Mild:
+    entries: []
+  Liver_Disease_Severe:
+    entries: []
+  Peptic_Ulcer_Disease:
+    entries: []
+  Rheumatic_Disease:
+    entries: []
+  AIDS_HIV:
+    entries: []
+  Malignancy_Any:
+    entries: []
+  Metastatic_Solid_Tumor:
+    entries: []

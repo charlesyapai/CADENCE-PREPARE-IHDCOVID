@@ -1,0 +1,182 @@
+# IHD-COVID Analysis Configuration
+# ==================================
+
+# 1. Global Settings
+# ------------------
+project_name: "IHD_COVID_Analysis_Redesign"
+version: "3.0"
+random_seed: 42
+
+# Paths (Relative to the execution script in revised_scripts/)
+paths:
+  catalog_config: "configs/data_catalog/catalog.yaml" # Root is 1 level up from revised_scripts
+  # revised_scripts -> IHD-COVID_analysis -> Dengue-IHD (Root)
+  output_dir: "./output"
+  raw_cache_dir: "./data/01_raw"
+  processed_dir: "./data/02_processed"
+  results_dir: "./data/03_results"
+
+# 2. Data Sources
+# ---------------
+# Patterns used by DataCatalog
+datasets:
+  mediclaims_pattern: "mediclaims_diag_{}" # Formatted with year (e.g. 2015)
+  covid_patterns:
+    - "ConfirmedCaseHeadersForAgenciesCNo0to100000"
+    - "ConfirmedCaseHeadersForAgenciesCNo100000to200000"
+    - "ConfirmedCaseHeadersForAgenciesCNo200000to300000"
+    - "ConfirmedCaseHeadersForAgenciesCNo300000to400000"
+    - "ConfirmedCaseHeadersForAgenciesCNo400000to500000"
+    - "ConfirmedCaseHeadersForAgencies1Dec2022"
+    - "ConfirmedCaseHeadersForAgencies1Jan2023"
+  death_registry: "death_registry"
+  singcloud:
+    gender: "SingCLOUD_gender"
+    dob: "SingCLOUD_DOB"
+    medications: "SingCLOUD_medication_items{}" # 1-29
+
+  # COVID severity, vaccination, and serology datasets
+  covid_facility_los: "COVIDFACILLOS"                          # 2.35M rows - LOS, ICU, Deceased, race, vacc
+  facility_utilization_ri: "FacilityUtilizationLOSSubsequentRI" # 2,319 rows - reinfected patients facility use
+  covid_reinfections: "COVID Reinfections"                      # 128K rows  - reinfection records
+  nir_vaccination: "NIRListtruncated"                           # 6.17M rows - national immunisation registry
+  serology_tests: "Serology_Tests_COVID"                        # 1.07M rows - serology results
+
+# 3. Study Parameters
+# -------------------
+study_period:
+  start_year: 2015
+  end_year: 2023
+
+cohort_definitions:
+  # Group 1: Post-COVID IHD (Window: 1 year after infection)
+  # Group 2: COVID Non-IHD (No IHD within 1 year)
+  # Group 3: Naive IHD (IHD with NO COVID in 1 year prior)
+  follow_up_days: 365
+  washout_period_days: 365 # For Group 3 (Ensure no COVID 1 yr prior)
+
+# 4. Clinical Definitions
+# -----------------------
+definitions:
+  # Diagnosis: Ischemic Heart Disease (IHD)
+  # Regex for "Index Event" discovery
+  ihd_regex: "(?i)myocardial|infarction|stemi|nstemi|heart\\s+attack"
+
+  # Valid ICD-10 Codes (Populated after discovery phase, or pre-defined)
+  ihd_icd10_codes:
+    - "I21"
+    - "I21.0"
+    - "I21.1"
+    - "I21.2"
+    - "I21.3"
+    - "I21.4"
+    - "I21.9"
+    # Added based on data frequency check (no dots)
+    - "I210"
+    - "I211"
+    - "I212"
+    - "I213"
+    - "I214"
+    - "I219"
+    # I22 Series (Subsequent STEMI/NSTEMI)
+    - "I22"
+    - "I220"
+    - "I221"
+    - "I228"
+    - "I229"
+
+  # Comorbidities (Name -> Regex)
+  # Expanded based on Charlson Comorbidity Index (CCI) categories
+  comorbidities:
+    # Cardiovascular
+    Myocardial_Infarction: "^(I21|I22|I25\\.2)"
+    Congestive_Heart_Failure: "^(I50|I11\\.0|I13\\.0|I13\\.2)"
+    Peripheral_Vascular_Disease: "^(I71|I73\\.9|I79\\.0|R02|Z95\\.8|Z99\\.2)"
+    Cerebrovascular_Disease: "^(I6[0-9]|G45|G46)"
+
+    # Respiratory
+    Chronic_Pulmonary_Disease: "^(J4[0-7]|J6[0-7])"
+
+    # Metabolic / Endocrine
+    Diabetes_Uncomplicated: "^(E1[0-4]\\.[019])"
+    Diabetes_Complicated: "^(E1[0-4]\\.[2-8])"
+
+    # Neurological
+    Dementia: "^(F0[0-3]|F05\\.1|G30|G31\\.1)"
+    Paraplegia_Hemiplegia: "^(G04\\.1|G11\\.4|G80\\.1|G80\\.2|G8[1-3])"
+
+    # Renal / Liver / GI
+    Renal_Disease: "^(N18|N19|I12|I13|N03\\.2|N05\\.2|Z49|Z94\\.0|Z99\\.2)"
+    Liver_Disease_Mild: "^(B18|K70\\.[0-39]|K71\\.[3-57]|K7[34]|K76\\.[02-489])"
+    Liver_Disease_Severe: "^(K70\\.4|K71\\.1|K72\\.[19]|K76\\.[5-7])"
+    Peptic_Ulcer_Disease: "^(K2[5-8])"
+
+    # Immune / Inflammatory
+    Rheumatic_Disease: "^(M05|M06|M31\\.5|M3[2-4]|M35\\.[13]|M36\\.0)"
+    AIDS_HIV: "^(B2[0-4])"
+
+    # Malignancy
+    Malignancy_Any: "^(C[0-1][0-9]|C2[0-6]|C3[0-4]|C3[7-9]|C4[0-1]|C43|C4[5-9]|C5[0-8]|C60-C76|C8[1-5]|C88|C9[0-7])"
+    Metastatic_Solid_Tumor: "^(C7[7-9]|C80)"
+
+    # Others commonly used in IHD
+    Hypertension: "^(I1[0-5])"
+    Hyperlipidemia: "^(E78)"
+    Obesity: "^(E66)"
+
+  # Medications (Class -> List of Keywords)
+  medications:
+    Statin:
+      - "statin"
+    Antiplatelet:
+      - "aspirin"
+      - "clopidogrel"
+      - "ticagrelor"
+      - "prasugrel"
+      - "dipyridamole"
+      - "cilostazol"
+    Antihypertensive:
+      - "pril"
+      - "sartan"
+      - "olol"
+      - "dipine"
+      - "furosemide"
+      - "hydrochlorothiazide"
+
+  # Variant Era Definitions (date boundaries for COVID infection date)
+  variant_eras:
+    Ancestral:
+      end: "2021-05-01"     # exclusive upper bound
+    Delta:
+      start: "2021-05-01"
+      end: "2022-01-01"
+    Omicron:
+      start: "2022-01-01"
+
+  # Mortality Analysis
+  mortality_windows:
+    - 1 # year
+    - 2 # years
+    - 3 # years
+
+# 5. Reference Population (For Standardization & SIR)
+# ---------------------------------------------------
+# Singapore Census 2020 (Approximate Resident Population)
+# Total Residents: ~4.04 Million
+population_denominator:
+  total: 4044000
+  age_sex_distribution:
+    # Format: Age_Lower_Bound: {M: count, F: count}
+    # Data approximated from SingStat 2020 Census of Population
+    # Age Group: 0-39
+    0: { M: 567000, F: 620000 }
+    # Age Group: 40-49
+    40: { M: 305000, F: 326000 }
+    # Age Group: 50-59
+    50: { M: 295000, F: 307000 }
+    # Age Group: 60-69
+    60: { M: 265000, F: 275000 }
+    # Age Group: 70-79
+    70: { M: 135000, F: 155000 }
+    # Age Group: 80+
+    80: { M: 55000, F: 80000 }
