@@ -13,11 +13,12 @@ We analyse Singapore's national administrative health data (MediClaims + SingCLO
 
 ### Cohort Definitions
 
-| Group | Label | Definition | N (approx) |
-|-------|-------|-----------|-------------|
-| G1 | Post-COVID IHD | COVID-positive → IHD within 365 days | 1,826 |
-| G2 | COVID No-IHD | COVID-positive → no IHD within 365 days | 465,526 |
+| Group | Label | Definition | N (confirmed) |
+|-------|-------|-----------|---------------|
+| G1 | Post-COVID IHD | COVID-positive → IHD within 365 days | 1,870 |
+| G2 | COVID No-IHD | COVID-positive → no IHD within 365 days | 483,981 |
 | G3 | Naive IHD | IHD diagnosis with NO COVID in 1 year prior | 70,838 |
+| Unknown | Unclassified | Missing group assignment | 75 |
 
 - **G1 vs G2** answers: "Among COVID patients, who develops IHD?"
 - **G1 vs G3** answers: "Are COVID-related IHD patients different from non-COVID IHD patients?"
@@ -86,8 +87,10 @@ When writing scripts, assume they will run in a SageMaker notebook/terminal with
 main_analysis_scripts_v2/
 ├── CONTEXT.md              ← You are here
 ├── DATA_CONTEXT.md         ← Data dictionary & catalog reference
+├── TIER3_ANALYSIS_PLAN.md  ← Tier 3 analytical strategy & expected findings
+├── TIER3_BIOSTATS_REVIEW.md ← Questions for senior biostatistics review
 ├── config.yaml             ← All study parameters, ICD codes, paths
-├── pipeline.py             ← Step orchestrator (runs steps 1-9)
+├── pipeline.py             ← Step orchestrator (runs steps 1-11)
 ├── main.py                 ← Entry point (placeholder)
 ├── simplified_analysis_plan.md  ← Detailed tier-wise analysis plan
 ├── catalog.py              ← DataCatalog class (copied from project root)
@@ -103,7 +106,9 @@ main_analysis_scripts_v2/
 │   ├── 7_cci_discovery_config.yaml  ← CCI component ICD pattern config
 │   ├── 8_apply_cci_codes.py         ← Compute CCI scores from discovered codes
 │   ├── 8_cci_curated_codes.yaml     ← Manually curated CCI ICD-10 codes
-│   └── 9_tier_2_analysis.py         ← Tier 2: Age + Gender + CCI
+│   ├── 9_tier_2_analysis.py         ← Tier 2: Age + Gender + CCI
+│   ├── 10_vaccine_severity_enrichment.py ← Ingest vacc/severity/race/serology
+│   └── 11_tier_3_analysis.py        ← Tier 3: Era & vaccination stratification
 │
 ├── src/
 │   ├── utils.py             ← Logging, viz helpers, DataFrame reporting
@@ -135,6 +140,8 @@ main_analysis_scripts_v2/
 | 7 | `7_cci_diagcode_discovery.py` | Discover which ICD-10 codes appear for each CCI component | Discovery YAML + reports |
 | 8 | `8_apply_cci_codes.py` | Compute CCI scores per patient using curated codes | CCI-augmented cohort CSV |
 | 9 | `9_tier_2_analysis.py` | Tier 2 logistic regression: Age + Gender + CCI | Model results, diagnostics |
+| 10 | `10_vaccine_severity_enrichment.py` | Ingest vaccination, severity, race, serology, reinfection data | `cohort_tier3_ready.csv` |
+| 11 | `11_tier_3_analysis.py` | Tier 3: Era & vaccination stratified models + interaction tests | Stratified model results |
 
 ---
 
@@ -162,7 +169,17 @@ Key sections in `config.yaml`:
 6. **Report**: Forest plots comparing ORs across eras, interaction tests, sample sizes per stratum
 7. **Sensitivity**: Consider whether era-specific confounding (e.g., testing rates, treatment protocols) biases results
 
-The existing `5_variant_era_analysis.py` computes crude era-specific rates and Cox models but does NOT run the Tier 2 logistic regression by era. Tier 3 is a new script (likely `10_tier_3_analysis.py`).
+The existing `5_variant_era_analysis.py` computes crude era-specific rates and Cox models but does NOT run the Tier 2 logistic regression by era. Tier 3 is implemented in Steps 10 and 11.
+
+### Step 10 Run Status (Confirmed)
+
+Step 10 was run on SageMaker. The cohort loaded successfully (556,764 patients) and variant era assignment worked:
+- G1 by era: Ancestral = 58, Delta = 445, Omicron = 1,367
+- G2 by era: Ancestral = 3,289, Delta = 40,862, Omicron = 439,830
+
+**However, all 5 external dataset merges returned 0 matches** — vaccination, severity, race, serology, and reinfection columns are all empty/null. Root cause is likely a catalog alias mismatch or uin format mismatch on SageMaker. See `DATA_CONTEXT.md` Section 7 for details and debugging steps.
+
+**Impact on Tier 3**: Components A (era-stratified G1 vs G2), C (era-stratified G1 vs G3), and E (interaction tests) can proceed using existing Age/Gender/CCI data. Components B (vaccination-stratified) and D (severity exploratory) are blocked until the merge is fixed.
 
 ---
 

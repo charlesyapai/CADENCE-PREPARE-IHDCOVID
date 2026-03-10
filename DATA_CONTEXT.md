@@ -107,6 +107,75 @@ cat.inject_into("mediclaims_diag_2019", "mediclaims_diag_2020", tgt_globals=glob
 - **Antiplatelet**: `aspirin`, `clopidogrel`, `ticagrelor`, `prasugrel`, `dipyridamole`, `cilostazol`
 - **Antihypertensive**: `pril`, `sartan`, `olol`, `dipine`, `furosemide`, `hydrochlorothiazide`
 
+### 2.6 COVIDFACILLOS — COVID Facility & Severity Data
+
+| Property | Value |
+|----------|-------|
+| Alias | `COVIDFACILLOS` |
+| Source | COVID-19 facility management system |
+| Granularity | One row per COVID case (may have duplicates per patient if multiple admissions) |
+| Rows | ~2,349,112 |
+| Date range | 2020-01-22 to 2024-02-28 |
+| Date format | `%d%b%Y` (e.g. `15Mar2021`) |
+| Key columns | `uin`, `notificationdate`, `Casenumber`, `CaseClass`, `age`, `gender`, `race` |
+| Severity columns | `LOS` (length of stay), `DaysInICU`, `Deceased`, `O2StartDate`, `O2EndDate` |
+| Vaccination columns | `vacc_date1`–`vacc_date5`, `vaccbrand1`–`vaccbrand5`, `VaccinationFourthDoseDate` |
+| Other columns | `passtype`, `flattype`, `Exposuretype`, `CPlus`, `AGPlus`, `EarliestEDVisit`, `EDVisits`, `HistoricalStatus`, `Status` |
+| Usage | Step 10: Primary source for COVID severity, race, and backup vaccination data |
+
+### 2.7 NIRListtruncated — National Immunisation Registry
+
+| Property | Value |
+|----------|-------|
+| Alias | `NIRListtruncated` |
+| Source | National Immunisation Registry (NIR) |
+| Granularity | One row per person |
+| Rows | ~6,174,098 |
+| Key columns | `uin`, `vacc_date1`–`vacc_date6`, `vaccbrand1`–`vaccbrand6` |
+| Notes | Most comprehensive vaccination source. Covers up to 6 doses (vs 5 in COVIDFACILLOS). Covers ALL residents, not just COVID cases. |
+| Usage | Step 10: Primary vaccination data source for all patients (G1, G2, G3) |
+
+### 2.8 COVID Reinfections
+
+| Property | Value |
+|----------|-------|
+| Alias | `COVID Reinfections` |
+| Source | COVID-19 reinfection surveillance |
+| Granularity | One row per reinfection event |
+| Rows | ~128,101 |
+| Key columns | `uin`, `notificationdate`, `Casenumber`, `CaseClass`, `age`, `reinfection_type`, `HistoricalStatus` |
+| Demographics | `cat_gender`, `cat_race`, `cat_passtype`, `cat_flattype` (note: prefixed with `cat_`) |
+| Severity columns | `DaysAtPHI`, `DaysAtCTF`, `DaysAtCIF`, `DaysAtCIFM`, `DaysAtDRF`, `DaysAtHRP`, `DaysO2`, `DaysInICU`, `Deceased` |
+| Vaccination columns | `vacc_date1`–`vacc_date5`, `vaccbrand1`–`vaccbrand5` |
+| Usage | Step 10: Reinfection flag + supplementary race data |
+
+### 2.9 FacilityUtilizationLOSSubsequentRI — Reinfection Facility Use
+
+| Property | Value |
+|----------|-------|
+| Alias | `FacilityUtilizationLOSSubsequentRI` |
+| Source | Facility utilisation for confirmed reinfected COVID patients |
+| Granularity | One row per reinfection episode |
+| Rows | ~2,319 |
+| Key columns | `uin`, `notificationdate`, `Age`, `Gender`, `reinfection_type`, `reinfno`, `prev_reinf_notif` |
+| Severity columns | `DaysAtPHI`, `DaysAtCTF`, `DaysAtCIF`, `DaysAtCIFM`, `DaysInICU`, `DaysO2`, `NRDate` |
+| Vaccination columns | `vacc_date1`–`vacc_date5`, `vaccbrand1`–`vaccbrand5` |
+| Usage | Step 10: Additional reinfection flag source |
+
+### 2.10 Serology_Tests_COVID — Serology Results
+
+| Property | Value |
+|----------|-------|
+| Alias | `Serology_Tests_COVID` |
+| Source | COVID-19 serology testing programme |
+| Granularity | One row per serology test |
+| Rows | ~1,067,600 |
+| Key columns | `uin`, `accesionno`, `serologyswabdate`, `serologyresultdate` |
+| Result columns | `serologyswabstatus`, `serologyresult`, `serologyctvalue`, `serologyresultindicator`, `serologyvalue` |
+| Lab columns | `serologylab`, `serologyswablocation`, `serologylabinterpretationnote` |
+| Metadata | `createdat`, `createdby`, `updatedat`, `updatedby` |
+| Usage | Step 10: Serology result and CT value (viral load proxy) linked to earliest test per patient |
+
 ---
 
 ## 3. Clinical Code Definitions
@@ -189,6 +258,10 @@ These are produced by the pipeline steps and stored in the configured `processed
 | `cci_discovery/` | Step 7 | ICD-10 code frequencies per CCI component |
 | `cohort_with_cci.csv` | Step 8 | Cohort with computed CCI total score |
 | `tier2_results/` | Step 9 | Tier 2 model outputs, attenuation analysis, G1vsG3 comparison |
+| `cohort_tier3_ready.csv` | Step 10 | Fully enriched cohort with vaccination, severity, era, serology |
+| `vaccination_summary.csv` | Step 10 | Vaccination coverage by group × era |
+| `severity_summary.csv` | Step 10 | Severity breakdown by group × era |
+| `enrichment_data_report.txt` | Step 10 | Detailed profiling of all merged data |
 
 ---
 
@@ -222,3 +295,94 @@ Used for age-sex standardised incidence rates (ASIR) and expected case calculati
 5. **Missing data**: SingCLOUD demographic linkage is not 100%. Some patients in MediClaims may not have gender/DOB records. Handle missing demographics gracefully.
 
 6. **ICD-10 dot inconsistency**: Critical — codes appear as both `I21.0` and `I210`. All regex patterns and lookups must account for optional dots. The config.yaml lists both variants.
+
+---
+
+## 7. Step 10 Run Results (Confirmed)
+
+Step 10 was executed against the actual cohort. The enrichment report confirmed the following.
+
+### 7.1 Confirmed Cohort Sizes
+
+| Group | N |
+|-------|---|
+| Group 1 (Post-COVID IHD) | 1,870 |
+| Group 2 (COVID No-IHD) | 483,981 |
+| Group 3 (Naive IHD) | 70,838 |
+| Unknown | 75 |
+| **Total** | **556,764** |
+
+### 7.2 Confirmed Variant Era Distribution (COVID patients)
+
+| Era | Group 1 | Group 2 |
+|-----|---------|---------|
+| Ancestral | 58 | 60,686 |
+| Delta | 445 | 215,750 |
+| Omicron | 1,367 | 207,545 |
+
+These are the actual stratification counts for Tier 3. Note:
+- Ancestral G1 has only 58 events (below the `MIN_EVENTS_FOR_MODEL=30` threshold, but borderline for 3-predictor models — may need Firth's penalized regression)
+- Delta G1 has 445 events — adequate for stratified modelling
+- Omicron G1 has 1,367 events — strong sample for all sub-stratifications
+
+### 7.3 External Dataset Merge Failure (UNRESOLVED)
+
+The five new datasets (COVIDFACILLOS, NIRListtruncated, COVID Reinfections, FacilityUtilizationLOSSubsequentRI, Serology_Tests_COVID) all failed to merge any data onto the cohort:
+
+| Variable | Non-null count | Expected |
+|----------|----------------|----------|
+| `doses_before_ref` | 0 (0%) | ~485K+ for COVID patients |
+| `vaccinated_before_covid` | 0 (0%) | ~485K+ |
+| `fully_vaccinated_before_covid` | 0 (0%) | ~485K+ |
+| `severity_category` | 556,764 (all "Unknown") | Mix of Mild/Moderate/Severe/Critical |
+| `race` | 0 (0%) | ~485K+ for COVID patients |
+| `serologyresult` | 0 (0%) | ~subset of COVID patients |
+| `is_reinfection` | 0 reinfected | ~some subset |
+
+**Root cause investigation needed.** Likely causes (check in order):
+
+1. **Catalog alias mismatch**: The aliases in `config.yaml` (e.g., `"COVIDFACILLOS"`, `"COVID Reinfections"`) may not match the actual entries in the working `catalog.yaml` on SageMaker. Verify exact alias names with `cat.list_datasets()`.
+2. **`uin` column name mismatch**: The cohort uses `uin` as the patient identifier. The new datasets also use `uin` (per the screenshots), but there may be casing differences (`UIN` vs `uin`) or the column may have a different name in practice. Check `df.columns` after loading each dataset.
+3. **`uin` value format mismatch**: The cohort `uin` values (from COVID case registry + MediClaims) may be formatted differently from the `uin` values in the new datasets (e.g., leading zeros, string vs int types). Compare `df['uin'].dtype` and sample values across datasets.
+4. **Catalog.yaml not updated**: The five new dataset entries may not have been added to the actual `catalog.yaml` file on SageMaker. The `config.yaml` references aliases, but those aliases must also exist in `catalog.yaml` with valid S3 paths.
+5. **S3 path errors**: The datasets may be at different S3 paths than what's in the catalog.
+
+**Debugging steps**:
+```python
+from catalog import DataCatalog
+cat = DataCatalog("catalog.yaml")
+print(cat.list_datasets())  # Check if aliases exist
+
+# Try loading one dataset
+df_test = cat.load("COVIDFACILLOS")
+print(df_test.columns.tolist())  # Check column names
+print(df_test['uin'].dtype, df_test['uin'].head())  # Check uin format
+
+# Compare with cohort
+df_cohort = pd.read_csv("data/02_processed/step_8_cci/cohort_enriched_cci.csv")
+print(df_cohort['uin'].dtype, df_cohort['uin'].head())
+
+# Check overlap
+cohort_uins = set(df_cohort['uin'].unique())
+new_uins = set(df_test['uin'].unique())
+print(f"Overlap: {len(cohort_uins & new_uins):,} / {len(cohort_uins):,}")
+```
+
+### 7.4 Variables Successfully Derived (from existing data)
+
+Despite the merge failures, these variables were derived from data already in the cohort:
+
+| Variable | Source | Status |
+|----------|--------|--------|
+| `variant_era` | Derived from `covid_date` | Fully populated for all COVID patients |
+| `severity_category` | Would use COVIDFACILLOS LOS/ICU/Deceased | All "Unknown" (no source data merged) |
+| `is_reinfection` | Would use COVID Reinfections + FacilityUtilization | All 0 (no source data merged) |
+
+### 7.5 Implications for Tier 3
+
+Until the external dataset merge is resolved:
+- **Component A (era-stratified G1 vs G2)**: Can proceed — uses only Age, Gender, CCI, and variant_era (all available)
+- **Component B (vaccination-stratified)**: BLOCKED — requires vaccination data
+- **Component C (era-stratified G1 vs G3)**: Can proceed — same covariates as A
+- **Component D (severity exploratory)**: BLOCKED — requires severity data
+- **Component E (interaction tests for era)**: Can proceed — era × CCI interaction uses existing data

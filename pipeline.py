@@ -41,8 +41,10 @@ def main():
         7: "7_cci_diagcode_discovery",
         8: "8_apply_cci_codes",
         9: "9_tier_2_analysis",
+        10: "10_vaccine_severity_enrichment",
+        11: "11_tier_3_analysis",
     }
-    
+
     # Map step numbers to their entry-point function names
     # (Most follow run_step_N, but newer scripts may differ)
     func_names = {
@@ -55,6 +57,8 @@ def main():
         7: "run_step_7",
         8: "run_step_8",
         9: "run_step_9",
+        10: "run_step_10",
+        11: "run_step_11",
     }
     
     to_run = []

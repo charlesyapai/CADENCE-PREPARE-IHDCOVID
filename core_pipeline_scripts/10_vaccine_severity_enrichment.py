@@ -39,7 +39,7 @@ import pandas as pd
 import numpy as np
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from src.utils import setup_logger, save_with_report, ensure_dir, report_df_info
+from src.utils import setup_logger, save_with_report, ensure_dir
 
 try:
     from catalog import DataCatalog
@@ -47,9 +47,9 @@ except ImportError:
     from src.catalog import DataCatalog
 
 
-# ==============================================================================
+# ===================================================
 # HELPERS
-# ==============================================================================
+# ===================================================
 
 def _count_doses_before_date(vacc_dates, ref_date):
     """
@@ -119,7 +119,7 @@ def _assign_severity(row):
         return 'Critical'
     if icu > 0:
         return 'Critical'
-    if o2:
+    if o2 is True:  # Explicit True check; NaN (unmatched G3 patients) should not trigger
         return 'Severe'
     if los > 7:
         return 'Moderate'
@@ -128,9 +128,9 @@ def _assign_severity(row):
     return 'Unknown'
 
 
-# ==============================================================================
+# ===================================================
 # DATA PROFILING
-# ==============================================================================
+# ===================================================
 
 def _profile_dataset(df, name, logger):
     """Log a detailed profile of a loaded dataset."""
@@ -151,7 +151,7 @@ def _profile_dataset(df, name, logger):
         logger.info(f"  Unique patients ({uin_col}): {df[uin_col].nunique():,}")
 
     # Missingness
-    logger.info(f"  Missing values:")
+    logger.info("  Missing values:")
     for col in df.columns:
         n_miss = df[col].isna().sum()
         if n_miss > 0:
@@ -176,14 +176,14 @@ def _profile_dataset(df, name, logger):
     return
 
 
-# ==============================================================================
+# ===================================================
 # MAIN
-# ==============================================================================
+# ===================================================
 
 def run_step_10(config):
-    # ------------------------------------------------------------------
+    # ----------------------------
     # 1. SETUP
-    # ------------------------------------------------------------------
+    # ----------------------------
     processed_dir = config['paths']['processed_dir']
     results_dir = os.path.join(config['paths']['results_dir'], "step_10_enrichment")
     output_dir = os.path.join(processed_dir, "step_10_enriched")
@@ -195,9 +195,9 @@ def run_step_10(config):
     logger.info("STEP 10: Vaccination, Severity & Serology Enrichment")
     logger.info("=" * 70)
 
-    # ------------------------------------------------------------------
+    # ----------------------------
     # 2. LOAD CCI-ENRICHED COHORT (Step 8 output)
-    # ------------------------------------------------------------------
+    # ----------------------------
     cohort_file = os.path.join(processed_dir, "step_8_cci", "cohort_enriched_cci.csv")
     if not os.path.exists(cohort_file):
         logger.error(f"Missing: {cohort_file}. Run Steps 1-8 first.")
@@ -219,16 +219,16 @@ def run_step_10(config):
     target_uins = set(df['uin'].unique())
     logger.info(f"  Target patients: {len(target_uins):,}")
 
-    # ------------------------------------------------------------------
+    # ----------------------------
     # 3. INITIALIZE CATALOG
-    # ------------------------------------------------------------------
+    # ----------------------------
     catalog_path = os.path.join(os.getcwd(), config['paths']['catalog_config'])
     cat = DataCatalog(catalog_path)
     logger.info(f"DataCatalog: {cat}")
 
-    # ==================================================================
+    # =========================================
     # 4. LOAD & PROFILE: COVIDFACILLOS (severity + vacc + race)
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "#" * 70)
     logger.info("LOADING: COVIDFACILLOS (COVID Facility LOS)")
     logger.info("#" * 70)
@@ -276,9 +276,9 @@ def run_step_10(config):
         df_severity = pd.DataFrame(columns=['uin'])
         df_facil_vacc = pd.DataFrame(columns=['uin'])
 
-    # ==================================================================
+    # =========================================
     # 5. LOAD & PROFILE: NIRListtruncated (primary vaccination source)
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "#" * 70)
     logger.info("LOADING: NIRListtruncated (National Immunisation Registry)")
     logger.info("#" * 70)
@@ -313,9 +313,9 @@ def run_step_10(config):
         nir_vacc_date_cols = []
         nir_vacc_brand_cols = []
 
-    # ==================================================================
+    # =========================================
     # 6. LOAD & PROFILE: COVID Reinfections
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "#" * 70)
     logger.info("LOADING: COVID Reinfections")
     logger.info("#" * 70)
@@ -351,9 +351,9 @@ def run_step_10(config):
         reinf_uins = set()
         df_reinf_race = pd.DataFrame(columns=['uin', 'race_reinf'])
 
-    # ==================================================================
+    # =========================================
     # 7. LOAD & PROFILE: FacilityUtilizationLOSSubsequentRI
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "#" * 70)
     logger.info("LOADING: FacilityUtilizationLOSSubsequentRI")
     logger.info("#" * 70)
@@ -375,9 +375,9 @@ def run_step_10(config):
     except Exception as e:
         logger.error(f"Failed to load FacilityUtilizationLOSSubsequentRI: {e}")
 
-    # ==================================================================
+    # =========================================
     # 8. LOAD & PROFILE: Serology_Tests_COVID
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "#" * 70)
     logger.info("LOADING: Serology_Tests_COVID")
     logger.info("#" * 70)
@@ -408,7 +408,7 @@ def run_step_10(config):
 
         # Log serology result distribution
         if 'serologyresult' in df_sero_dedup.columns:
-            logger.info(f"  Serology result distribution:")
+            logger.info("  Serology result distribution:")
             for val, cnt in df_sero_dedup['serologyresult'].value_counts().head(10).items():
                 logger.info(f"    {val}: {cnt:,}")
 
@@ -419,9 +419,9 @@ def run_step_10(config):
         logger.error(f"Failed to load Serology_Tests_COVID: {e}")
         df_sero_dedup = pd.DataFrame(columns=['uin'])
 
-    # ==================================================================
+    # =========================================
     # 9. MERGE EVERYTHING ONTO COHORT
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "=" * 70)
     logger.info("MERGING ALL ENRICHMENT DATA ONTO COHORT")
     logger.info("=" * 70)
@@ -474,9 +474,9 @@ def run_step_10(config):
     assert len(df) == n_before, \
         f"Row count changed during merges: {n_before} -> {len(df)}"
 
-    # ==================================================================
+    # =========================================
     # 10. DERIVE VACCINATION VARIABLES
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "-" * 50)
     logger.info("Deriving vaccination variables")
     logger.info("-" * 50)
@@ -501,7 +501,7 @@ def run_step_10(config):
                 lambda row: _get_primary_brand(row, nir_brand_cols_in_df), axis=1
             )
 
-        logger.info(f"  Dose distribution before ref_date:")
+        logger.info("  Dose distribution before ref_date:")
         for n_doses in sorted(df['doses_before_ref'].unique()):
             cnt = (df['doses_before_ref'] == n_doses).sum()
             logger.info(f"    {n_doses} doses: {cnt:,} ({cnt/len(df)*100:.1f}%)")
@@ -511,7 +511,7 @@ def run_step_10(config):
         logger.info(f"  Fully vaccinated (≥2 doses): {df['fully_vaccinated_before_covid'].sum():,}")
 
         if 'vaccine_brand_primary' in df.columns:
-            logger.info(f"  Vaccine brand distribution:")
+            logger.info("  Vaccine brand distribution:")
             for brand, cnt in df['vaccine_brand_primary'].value_counts().head(10).items():
                 logger.info(f"    {brand}: {cnt:,}")
 
@@ -521,16 +521,16 @@ def run_step_10(config):
         df['vaccinated_before_covid'] = np.nan
         df['fully_vaccinated_before_covid'] = np.nan
 
-    # ==================================================================
+    # =========================================
     # 11. DERIVE SEVERITY CATEGORY
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "-" * 50)
     logger.info("Deriving severity category")
     logger.info("-" * 50)
 
     df['severity_category'] = df.apply(_assign_severity, axis=1)
 
-    logger.info(f"  Severity distribution:")
+    logger.info("  Severity distribution:")
     for cat_name, cnt in df['severity_category'].value_counts().items():
         logger.info(f"    {cat_name}: {cnt:,} ({cnt/len(df)*100:.1f}%)")
 
@@ -542,16 +542,16 @@ def run_step_10(config):
             for cat_name, cnt in sub['severity_category'].value_counts().items():
                 logger.info(f"    {cat_name}: {cnt:,} ({cnt/len(sub)*100:.1f}%)")
 
-    # ==================================================================
+    # =========================================
     # 12. ASSIGN VARIANT ERA
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "-" * 50)
     logger.info("Assigning variant eras")
     logger.info("-" * 50)
 
     df['variant_era'] = df['covid_date'].apply(_assign_era)
 
-    logger.info(f"  Era distribution:")
+    logger.info("  Era distribution:")
     for era, cnt in df['variant_era'].value_counts().items():
         logger.info(f"    {era}: {cnt:,}")
 
@@ -563,9 +563,9 @@ def run_step_10(config):
             for era, cnt in sub['variant_era'].value_counts().items():
                 logger.info(f"    {era}: {cnt:,}")
 
-    # ==================================================================
+    # =========================================
     # 13. GENERATE SUMMARY TABLES
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "-" * 50)
     logger.info("Generating summary tables")
     logger.info("-" * 50)
@@ -601,9 +601,9 @@ def run_step_10(config):
         sev_summary.to_csv(sev_path, index=False)
         logger.info(f"  Saved: {sev_path}")
 
-    # ==================================================================
+    # =========================================
     # 14. SAVE FINAL ENRICHED COHORT
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "=" * 70)
     logger.info("SAVING FINAL ENRICHED COHORT")
     logger.info("=" * 70)
@@ -626,9 +626,9 @@ def run_step_10(config):
     save_with_report(df, output_path, "Tier 3 Ready Cohort (Step 10)", logger)
     logger.info(f"  Final shape: {df.shape}")
 
-    # ==================================================================
+    # =========================================
     # 15. DETAILED DATA REPORT
-    # ==================================================================
+    # =========================================
     logger.info("\n" + "-" * 50)
     logger.info("Writing enrichment data report")
     logger.info("-" * 50)
