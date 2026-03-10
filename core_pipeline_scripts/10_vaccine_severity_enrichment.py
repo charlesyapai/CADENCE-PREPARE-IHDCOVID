@@ -226,6 +226,13 @@ def run_step_10(config):
     cat = DataCatalog(catalog_path)
     logger.info(f"DataCatalog: {cat}")
 
+    # --- Dataset catalog aliases (hardcoded to avoid config dependency) ---
+    DS_COVID_FACILITY = config.get('datasets', {}).get('covid_facility_los', 'COVIDFACILLOS')
+    DS_NIR_VACC = config.get('datasets', {}).get('nir_vaccination', 'NIRListtruncated')
+    DS_REINFECTIONS = config.get('datasets', {}).get('covid_reinfections', 'COVID Reinfections')
+    DS_FACIL_RI = config.get('datasets', {}).get('facility_utilization_ri', 'FacilityUtilizationLOSSubsequentRI')
+    DS_SEROLOGY = config.get('datasets', {}).get('serology_tests', 'Serology_Tests_COVID')
+
     # =========================================
     # 4. LOAD & PROFILE: COVIDFACILLOS (severity + vacc + race)
     # =========================================
@@ -234,7 +241,7 @@ def run_step_10(config):
     logger.info("#" * 70)
 
     try:
-        df_facil = cat.load(config['datasets']['covid_facility_los'])
+        df_facil = cat.load(DS_COVID_FACILITY)
         _profile_dataset(df_facil, "COVIDFACILLOS", logger)
 
         # Filter to cohort patients
@@ -284,7 +291,7 @@ def run_step_10(config):
     logger.info("#" * 70)
 
     try:
-        df_nir = cat.load(config['datasets']['nir_vaccination'])
+        df_nir = cat.load(DS_NIR_VACC)
         _profile_dataset(df_nir, "NIRListtruncated", logger)
 
         # Filter to cohort
@@ -321,7 +328,7 @@ def run_step_10(config):
     logger.info("#" * 70)
 
     try:
-        df_reinf = cat.load(config['datasets']['covid_reinfections'])
+        df_reinf = cat.load(DS_REINFECTIONS)
         _profile_dataset(df_reinf, "COVID Reinfections", logger)
 
         df_reinf = df_reinf[df_reinf['uin'].isin(target_uins)].copy()
@@ -359,7 +366,7 @@ def run_step_10(config):
     logger.info("#" * 70)
 
     try:
-        df_facil_ri = cat.load(config['datasets']['facility_utilization_ri'])
+        df_facil_ri = cat.load(DS_FACIL_RI)
         _profile_dataset(df_facil_ri, "FacilityUtilizationLOSSubsequentRI", logger)
 
         df_facil_ri = df_facil_ri[df_facil_ri['uin'].isin(target_uins)].copy()
@@ -383,7 +390,7 @@ def run_step_10(config):
     logger.info("#" * 70)
 
     try:
-        df_sero = cat.load(config['datasets']['serology_tests'])
+        df_sero = cat.load(DS_SEROLOGY)
         _profile_dataset(df_sero, "Serology_Tests_COVID", logger)
 
         df_sero = df_sero[df_sero['uin'].isin(target_uins)].copy()
@@ -471,6 +478,20 @@ def run_step_10(config):
     df['is_reinfection'] = df['uin'].isin(reinf_uins).astype(int)
     logger.info(f"  Reinfection patients in cohort: {df['is_reinfection'].sum():,}")
 
+    # 9f. Normalize race values (source data uses UPPERCASE/plural forms)
+    if 'race' in df.columns:
+        race_map = {
+            'CHINESE': 'Chinese',
+            'INDIANS': 'Indian',
+            'MALAYS': 'Malay',
+            'OTHERS': 'Others',
+            'EURASIANS': 'Eurasian',
+        }
+        before_nunique = df['race'].nunique()
+        df['race'] = df['race'].map(race_map).fillna(df['race'])
+        logger.info(f"  Race normalized ({before_nunique} unique -> {df['race'].nunique()} unique): "
+                    f"{df['race'].value_counts().to_dict()}")
+
     assert len(df) == n_before, \
         f"Row count changed during merges: {n_before} -> {len(df)}"
 
@@ -494,6 +515,19 @@ def run_step_10(config):
         df['doses_before_ref'] = _count_doses_before_date(vacc_date_df, df['ref_date'])
         df['vaccinated_before_covid'] = (df['doses_before_ref'] >= 1).astype(int)
         df['fully_vaccinated_before_covid'] = (df['doses_before_ref'] >= 2).astype(int)
+
+        # 6-month window: any dose within 6 months (183 days) before ref_date
+        window_6mo = pd.Timedelta(days=183)
+        has_dose_in_6mo = pd.Series(False, index=df.index)
+        for col in vacc_date_df.columns:
+            dt = vacc_date_df[col]
+            in_window = (dt.notnull()) & (dt < df['ref_date']) & (dt >= df['ref_date'] - window_6mo)
+            has_dose_in_6mo = has_dose_in_6mo | in_window
+        df['vaccinated_6mo_before_covid'] = has_dose_in_6mo.astype(int)
+
+        logger.info(f"  Vaccinated within 6 months of COVID: "
+                    f"{df['vaccinated_6mo_before_covid'].sum():,} "
+                    f"({df['vaccinated_6mo_before_covid'].mean()*100:.1f}%)")
 
         # Primary vaccine brand
         if nir_brand_cols_in_df:
@@ -519,6 +553,7 @@ def run_step_10(config):
         logger.warning("  No NIR vaccination columns found; skipping dose derivation")
         df['doses_before_ref'] = np.nan
         df['vaccinated_before_covid'] = np.nan
+        df['vaccinated_6mo_before_covid'] = np.nan
         df['fully_vaccinated_before_covid'] = np.nan
 
     # =========================================
@@ -648,8 +683,8 @@ def run_step_10(config):
     report.append("NEW VARIABLES ADDED:")
     new_vars = ['LOS', 'DaysInICU', 'Deceased', 'required_O2', 'race',
                 'is_reinfection', 'doses_before_ref', 'vaccinated_before_covid',
-                'fully_vaccinated_before_covid', 'vaccine_brand_primary',
-                'severity_category', 'variant_era',
+                'vaccinated_6mo_before_covid', 'fully_vaccinated_before_covid',
+                'vaccine_brand_primary', 'severity_category', 'variant_era',
                 'serologyresult', 'serologyctvalue', 'serologyvalue']
     for var in new_vars:
         if var in df.columns:

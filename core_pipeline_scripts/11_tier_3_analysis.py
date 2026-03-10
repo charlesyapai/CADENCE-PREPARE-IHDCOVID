@@ -387,6 +387,15 @@ def prepare_analysis_data(df, logger):
                 return 'Omicron'
         df['variant_era'] = df['covid_date'].apply(assign_era)
 
+    # Normalize race values (defensive: handles UPPERCASE from COVIDFACILLOS)
+    if 'race' in df.columns:
+        race_map = {
+            'CHINESE': 'Chinese', 'INDIANS': 'Indian', 'MALAYS': 'Malay',
+            'OTHERS': 'Others', 'EURASIANS': 'Eurasian',
+        }
+        df['race'] = df['race'].map(race_map).fillna(df['race'])
+        logger.info(f"  Race distribution: {df['race'].value_counts().to_dict()}")
+
     # Outcome for G1 vs G2 models
     df['outcome'] = (df['group'] == 'Group 1').astype(int)
 
@@ -530,14 +539,31 @@ def run_era_stratified_g1g2(covid, logger, results_dir):
 # ==============================================================================
 
 def run_vaccination_stratified(covid, logger, results_dir):
-    """Run Tier 2 model within vaccination strata, per era (Delta/Omicron)."""
+    """Run Tier 2 model within vaccination strata, per era (Delta/Omicron).
+
+    Vaccination defined as: any dose received within 6 months (183 days)
+    before the COVID infection date. This captures immunologically relevant
+    protection rather than any-time-ever vaccination.
+    """
     logger.info("\n" + "=" * 70)
     logger.info("COMPONENT B: Vaccination-Stratified Models (within Delta & Omicron)")
     logger.info("  Ancestral era excluded (vaccines not yet available)")
+    logger.info("  Vaccination window: any dose within 6 months before COVID date")
     logger.info("=" * 70)
 
     vacc_dir = os.path.join(results_dir, "vacc_models")
     ensure_dir(vacc_dir)
+
+    # Determine which vaccination column to use
+    # Prefer 6-month window; fall back to any-time-before
+    if 'vaccinated_6mo_before_covid' in covid.columns and covid['vaccinated_6mo_before_covid'].notnull().any():
+        vacc_col = 'vaccinated_6mo_before_covid'
+        logger.info(f"  Using 6-month vaccination window (vaccinated_6mo_before_covid)")
+    elif 'vaccinated_before_covid' in covid.columns:
+        vacc_col = 'vaccinated_before_covid'
+        logger.info(f"  Falling back to any-time vaccination (vaccinated_before_covid)")
+    else:
+        vacc_col = None
 
     vacc_results = {}
     vacc_summaries = []
@@ -546,12 +572,18 @@ def run_vaccination_stratified(covid, logger, results_dir):
     for era in ['Delta', 'Omicron']:
         era_df = covid[covid['variant_era'] == era].copy()
 
-        if 'vaccinated_before_covid' not in era_df.columns:
-            logger.warning(f"  No vaccination data available. Skipping.")
+        if vacc_col is None or vacc_col not in era_df.columns:
+            logger.warning("  No vaccination data available. Skipping.")
             continue
 
+        # Log vaccination coverage for this era
+        n_vacc = (era_df[vacc_col] == 1).sum()
+        n_unvacc = (era_df[vacc_col] == 0).sum()
+        logger.info(f"\n  {era}: Vaccinated={n_vacc:,}, Unvaccinated={n_unvacc:,} "
+                    f"(using {vacc_col})")
+
         for vacc_label, vacc_filter in [('Unvaccinated', 0), ('Vaccinated', 1)]:
-            stratum = era_df[era_df['vaccinated_before_covid'] == vacc_filter].copy()
+            stratum = era_df[era_df[vacc_col] == vacc_filter].copy()
             # For vaccinated, optionally further split by fully vs partially
             n_total = len(stratum)
             n_events = stratum['outcome'].sum()
@@ -1172,14 +1204,19 @@ def generate_descriptive_tables(df_all, covid, logger, results_dir):
     table1_era_group.to_csv(os.path.join(desc_dir, "table1_by_era_group.csv"), index=False)
     logger.info("  Saved: table1_by_era_group.csv")
 
-    # Vaccination coverage by era
+    # Vaccination coverage by era (both any-time and 6-month window)
     if 'vaccinated_before_covid' in covid.columns:
-        vacc_table = covid.groupby('variant_era').agg(
-            N=('uin', 'count'),
-            N_vacc=('vaccinated_before_covid', lambda x: x.sum()),
-            Mean_doses=('doses_before_ref', 'mean'),
-        ).reset_index()
-        vacc_table['Pct_vacc'] = (vacc_table['N_vacc'] / vacc_table['N'] * 100).round(1)
+        agg_dict = {
+            'N': ('uin', 'count'),
+            'N_vacc_anytime': ('vaccinated_before_covid', lambda x: x.sum()),
+            'Mean_doses': ('doses_before_ref', 'mean'),
+        }
+        if 'vaccinated_6mo_before_covid' in covid.columns:
+            agg_dict['N_vacc_6mo'] = ('vaccinated_6mo_before_covid', lambda x: x.sum())
+        vacc_table = covid.groupby('variant_era').agg(**agg_dict).reset_index()
+        vacc_table['Pct_vacc_anytime'] = (vacc_table['N_vacc_anytime'] / vacc_table['N'] * 100).round(1)
+        if 'N_vacc_6mo' in vacc_table.columns:
+            vacc_table['Pct_vacc_6mo'] = (vacc_table['N_vacc_6mo'] / vacc_table['N'] * 100).round(1)
         vacc_table.to_csv(os.path.join(desc_dir, "vacc_coverage_by_era.csv"), index=False)
         logger.info("  Saved: vacc_coverage_by_era.csv")
         logger.info(f"\n{vacc_table.to_string(index=False)}")
