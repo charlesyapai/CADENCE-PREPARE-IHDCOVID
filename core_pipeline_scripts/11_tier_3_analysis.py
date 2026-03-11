@@ -5,7 +5,7 @@ Tier 3 of the Stepwise DAG-Aligned Analysis:
     Run Tier 2 model within variant-era and vaccination strata.
 
     For each stratum:
-        logit(P(IHD=1)) = b0 + b1(Age) + b2(Male) + b3(CCI)
+        logit(P(IHD=1)) = b0 + b1(Age) + b2(Male) + b3(CCI) + b4..k(Race)
 
 Purpose:
     Determine whether the COVID->IHD association (and the role of comorbidity)
@@ -90,6 +90,37 @@ ERA_COLORS = {'Ancestral': '#e74c3c', 'Delta': '#f39c12', 'Omicron': '#2980b9'}
 # ==============================================================================
 # HELPER FUNCTIONS
 # ==============================================================================
+
+RACE_REFERENCE = 'Chinese'
+RACE_FORMULA_TERM = f'C(race, Treatment(reference="{RACE_REFERENCE}"))'
+
+BASE_PREDICTORS = ['age', 'gender_male', 'cci_score']
+BASE_FORMULA = 'outcome ~ age + gender_male + cci_score'
+
+
+def build_formula(outcome_col, df, logger, label=""):
+    """
+    Build the model formula, adding race if available with sufficient coverage.
+    Returns (formula_string, n_predictors, has_race).
+    """
+    base = f'{outcome_col} ~ age + gender_male + cci_score'
+    n_pred = 3
+
+    if 'race' in df.columns:
+        race_coverage = df['race'].notnull().mean()
+        n_race_levels = df['race'].dropna().nunique()
+        if race_coverage >= 0.5 and n_race_levels >= 2:
+            formula = f'{base} + {RACE_FORMULA_TERM}'
+            n_pred += n_race_levels - 1  # dummy variables (minus reference)
+            if label:
+                logger.info(f"  [{label}] Including race ({n_race_levels} levels, "
+                            f"ref={RACE_REFERENCE}, coverage={race_coverage*100:.0f}%)")
+            return formula, n_pred, True
+
+    if label:
+        logger.info(f"  [{label}] Race not available or insufficient coverage — using base model")
+    return base, n_pred, False
+
 
 def compute_smd(g1_vals, g2_vals):
     """Standardised Mean Difference (Cohen's d)."""
@@ -410,7 +441,7 @@ def run_era_stratified_g1g2(covid, logger, results_dir):
     """Run Tier 2 model within each era for COVID patients (G1 vs G2)."""
     logger.info("\n" + "=" * 70)
     logger.info("COMPONENT A: Era-Stratified Logistic Regression (G1 vs G2)")
-    logger.info("  Model: logit(IHD) = Age + Male + CCI, separately per era")
+    logger.info("  Model: logit(IHD) = Age + Male + CCI + Race, separately per era")
     logger.info("=" * 70)
 
     era_dir = os.path.join(results_dir, "era_models")
@@ -438,14 +469,23 @@ def run_era_stratified_g1g2(covid, logger, results_dir):
             })
             continue
 
-        # Drop missing
-        analysis_df = era_df.dropna(subset=['age', 'gender_male', 'cci_score']).copy()
+        # Drop missing (base covariates)
+        drop_subset = ['age', 'gender_male', 'cci_score']
+        analysis_df = era_df.dropna(subset=drop_subset).copy()
         n_dropped = n_total - len(analysis_df)
         if n_dropped > 0:
             logger.info(f"  Dropped {n_dropped} rows with missing age/gender/cci")
 
-        formula = 'outcome ~ age + gender_male + cci_score'
+        # Also drop rows with missing race if race is available
+        if 'race' in analysis_df.columns:
+            n_before_race = len(analysis_df)
+            analysis_df = analysis_df.dropna(subset=['race']).copy()
+            n_race_dropped = n_before_race - len(analysis_df)
+            if n_race_dropped > 0:
+                logger.info(f"  Dropped {n_race_dropped} rows with missing race")
+
         label = f"G1G2_{era}"
+        formula, n_predictors_used, has_race = build_formula('outcome', analysis_df, logger, label)
 
         model, method = fit_logistic(formula, analysis_df, logger, label)
 
@@ -483,9 +523,10 @@ def run_era_stratified_g1g2(covid, logger, results_dir):
 
         summary_path = os.path.join(era_dir, f"tier3_{era.lower()}_g1g2.txt")
         with open(summary_path, 'w') as f:
+            model_desc = "logit(IHD) = Age + Male + CCI + Race" if has_race else "logit(IHD) = Age + Male + CCI"
             f.write(f"TIER 3 - {era.upper()} ERA: G1 vs G2 LOGISTIC REGRESSION\n")
             f.write("=" * 60 + "\n\n")
-            f.write(f"Model: logit(IHD) = Age + Male + CCI\n")
+            f.write(f"Model: {model_desc}\n")
             f.write(f"N = {len(analysis_df):,} (G1={analysis_df['outcome'].sum():,}, "
                     f"G2={len(analysis_df)-analysis_df['outcome'].sum():,})\n")
             f.write(f"Fit method: {method}\n")
@@ -498,18 +539,28 @@ def run_era_stratified_g1g2(covid, logger, results_dir):
         plot_df = or_df[or_df['Variable'] != 'Intercept'].reset_index(drop=True)
         rename = {'age': 'Age (per year)', 'gender_male': 'Male Sex',
                   'cci_score': 'CCI Score (per point)'}
-        plot_df['Variable'] = plot_df['Variable'].map(lambda x: rename.get(x, x))
+        # Clean up race variable names for display
+        def _clean_var(x):
+            if x in rename:
+                return rename[x]
+            if 'race' in x.lower() and 'T.' in x:
+                # e.g. "C(race, Treatment(reference="Chinese"))[T.Indian]" -> "Race: Indian"
+                race_val = x.split('[T.')[-1].rstrip(']')
+                return f"Race: {race_val}"
+            return x
+        plot_df['Variable'] = plot_df['Variable'].map(_clean_var)
         make_forest_plot(
             plot_df, os.path.join(era_dir, f"tier3_{era.lower()}_g1g2_forest.png"),
             title=f"Tier 3 ({era}): Adjusted ORs (G1 vs G2)"
         )
 
-        n_predictors = 3  # age, gender_male, cci_score
-        epv = n_events / n_predictors if n_predictors > 0 else 0
+        epv = n_events / n_predictors_used if n_predictors_used > 0 else 0
 
         era_summaries.append({
             'Era': era, 'N': n_total, 'Events': n_events,
             'Rate_pct': event_rate, 'EPV': round(epv, 1),
+            'N_predictors': n_predictors_used,
+            'Race_included': has_race,
             'Firth_used': method in ('firth', 'firth_approx'),
             'Apparent_AUC': auc,
             'Age_OR': or_df.loc[or_df['Variable'] == 'age', 'OR'].values[0] if 'age' in or_df['Variable'].values else np.nan,
@@ -603,8 +654,11 @@ def run_vaccination_stratified(covid, logger, results_dir):
                 continue
 
             analysis_df = stratum.dropna(subset=['age', 'gender_male', 'cci_score']).copy()
-            formula = 'outcome ~ age + gender_male + cci_score'
+            if 'race' in analysis_df.columns:
+                analysis_df = analysis_df.dropna(subset=['race']).copy()
+
             label = f"G1G2_{era}_{vacc_label}"
+            formula, _, _ = build_formula('outcome', analysis_df, logger, label)
 
             model, method = fit_logistic(formula, analysis_df, logger, label)
 
@@ -974,6 +1028,89 @@ def run_severity_exploratory(covid, logger, results_dir):
             or_era = extract_or_table(model_era)
             or_era.to_csv(os.path.join(sev_dir, f"severity_{era.lower()}_dummy_ors.csv"), index=False)
 
+    # --- LOS as continuous covariate ---
+    logger.info("\n  --- LOS as Continuous Covariate ---")
+    if 'LOS' in covid.columns:
+        los_df = covid.dropna(subset=['age', 'gender_male', 'cci_score', 'LOS']).copy()
+        los_df['LOS'] = pd.to_numeric(los_df['LOS'], errors='coerce')
+        los_df = los_df[los_df['LOS'] >= 0].copy()
+        n_los_events = los_df['outcome'].sum()
+
+        logger.info(f"  Patients with LOS data: {len(los_df):,} (G1={n_los_events:,})")
+        logger.info(f"  LOS distribution: mean={los_df['LOS'].mean():.1f}, "
+                    f"median={los_df['LOS'].median():.0f}, "
+                    f"IQR={los_df['LOS'].quantile(0.25):.0f}-{los_df['LOS'].quantile(0.75):.0f}")
+
+        if n_los_events >= MIN_EVENTS_FOR_MODEL:
+            formula_los = 'outcome ~ age + gender_male + cci_score + LOS'
+            model_los, _ = fit_logistic(formula_los, los_df, logger, "los_continuous")
+
+            if model_los is not None:
+                or_los = extract_or_table(model_los)
+                logger.info("  LOS continuous model results:")
+                for _, row in or_los.iterrows():
+                    logger.info(f"    {row['Variable']:25s}  OR={row['OR']:.4f}  "
+                                f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
+                                f"p={row['p_value']:.2e} {row['Significant']}")
+                or_los.to_csv(os.path.join(sev_dir, "los_continuous_model_ors.csv"), index=False)
+
+                with open(os.path.join(sev_dir, "los_continuous_model.txt"), 'w') as f:
+                    f.write("EXPLORATORY: LOS AS CONTINUOUS COVARIATE\n")
+                    f.write("=" * 60 + "\n\n")
+                    f.write("CAUTION: LOS is a severity indicator and potential MEDIATOR.\n\n")
+                    f.write(f"N = {len(los_df):,} (G1={n_los_events:,})\n")
+                    f.write(f"LOS: mean={los_df['LOS'].mean():.1f}, "
+                            f"median={los_df['LOS'].median():.0f}\n\n")
+                    f.write(model_los.summary().as_text())
+
+        # LOS by group and era descriptive table
+        los_desc = []
+        for grp in ['Group 1', 'Group 2']:
+            for era in ERA_ORDER:
+                sub = los_df[(los_df['group'] == grp) & (los_df['variant_era'] == era)]
+                if len(sub) > 0:
+                    los_desc.append({
+                        'Group': grp, 'Era': era, 'N': len(sub),
+                        'LOS_mean': sub['LOS'].mean(),
+                        'LOS_median': sub['LOS'].median(),
+                        'LOS_q25': sub['LOS'].quantile(0.25),
+                        'LOS_q75': sub['LOS'].quantile(0.75),
+                        'LOS_max': sub['LOS'].max(),
+                    })
+        if los_desc:
+            los_desc_df = pd.DataFrame(los_desc)
+            los_desc_df.to_csv(os.path.join(sev_dir, "los_by_group_era.csv"), index=False)
+            logger.info(f"\n  LOS by Group x Era:\n{los_desc_df.to_string(index=False)}")
+    else:
+        logger.info("  No LOS column available.")
+
+    # --- Severity distribution descriptive table ---
+    logger.info("\n  --- Severity Distribution by Group x Era ---")
+    if 'severity_category' in covid.columns:
+        sev_desc = covid.groupby(['group', 'variant_era', 'severity_category']).size().reset_index(name='count')
+        sev_pivot = sev_desc.pivot_table(
+            index=['group', 'variant_era'], columns='severity_category',
+            values='count', fill_value=0
+        ).reset_index()
+        sev_pivot.to_csv(os.path.join(sev_dir, "severity_distribution_by_group_era.csv"), index=False)
+        logger.info(f"\n  Severity distribution:\n{sev_pivot.to_string(index=False)}")
+
+        # Event rate by severity category
+        sev_event_rates = []
+        for sev_cat in ['Mild', 'Moderate', 'Severe', 'Critical', 'Unknown']:
+            sub = covid[covid['severity_category'] == sev_cat]
+            if len(sub) > 0:
+                n_ev = sub['outcome'].sum()
+                sev_event_rates.append({
+                    'Severity': sev_cat, 'N': len(sub),
+                    'G1_events': n_ev,
+                    'Event_rate_pct': n_ev / len(sub) * 100,
+                })
+        if sev_event_rates:
+            sev_rate_df = pd.DataFrame(sev_event_rates)
+            sev_rate_df.to_csv(os.path.join(sev_dir, "event_rate_by_severity.csv"), index=False)
+            logger.info(f"\n  Event rate by severity:\n{sev_rate_df.to_string(index=False)}")
+
 
 # ==============================================================================
 # ANALYSIS COMPONENT E: INTERACTION TESTS
@@ -1240,7 +1377,7 @@ def run_step_11(config):
     logger = setup_logger("tier_3", results_dir)
     logger.info("=" * 70)
     logger.info("TIER 3 ANALYSIS: Era & Vaccination Stratification")
-    logger.info("  Model per stratum: logit(IHD) = Age + Male + CCI")
+    logger.info("  Model per stratum: logit(IHD) = Age + Male + CCI + Race (when available)")
     logger.info("=" * 70)
 
     # ------------------------------------------------------------------
@@ -1315,7 +1452,7 @@ def run_step_11(config):
     summary_lines.append("TIER 3 ANALYSIS: EXECUTIVE SUMMARY")
     summary_lines.append("=" * 70)
     summary_lines.append("")
-    summary_lines.append("MODEL: logit(IHD) = Age + Male + CCI, stratified by variant era & vaccination")
+    summary_lines.append("MODEL: logit(IHD) = Age + Male + CCI + Race, stratified by variant era & vaccination")
     summary_lines.append(f"TOTAL COVID COHORT: {len(covid):,} (G1={n_g1:,}, G2={n_g2:,})")
     summary_lines.append(f"OVERALL EVENT RATE: {n_g1/len(covid)*100:.3f}%")
     summary_lines.append("")
