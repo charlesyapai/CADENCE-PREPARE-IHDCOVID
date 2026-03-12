@@ -55,26 +55,32 @@ def run_step_1(config):
     # ------------------
     extracted_chunks = []
     stats_per_year = {}
-    
+    all_mediclaims_uins = set()  # Track ALL unique UINs across all MediClaims years
+
     for year in range(start_year, end_year + 1):
         alias = config['datasets']['mediclaims_pattern'].format(year)
         logger.info(f"Scanning {alias}...")
-        
+
         try:
             # We ONLY need diagcode and uin and dates at this stage
             df = cat.load(alias, usecols=['uin', 'diagcode', 'discharge_date'])
-            
-            # Filter
+
+            # Collect ALL unique UINs from this year's MediClaims
+            year_uins = set(df['uin'].unique())
+            all_mediclaims_uins.update(year_uins)
+            logger.info(f"  -> {len(year_uins):,} unique patients in MediClaims {year}")
+
+            # Filter for IHD
             mask = df['diagcode'].isin(ihd_codes)
             subset = df[mask].copy()
-            
+
             count = len(subset)
             stats_per_year[str(year)] = count
-            logger.info(f"  -> Found {count:,} events.")
-            
+            logger.info(f"  -> Found {count:,} IHD events.")
+
             if not subset.empty:
                 extracted_chunks.append(subset)
-            
+
             del df
             del mask
             del subset
@@ -138,7 +144,15 @@ def run_step_1(config):
     ensure_dir(step_out_dir)
     
     outfile = os.path.join(step_out_dir, "index_events.csv")
-    
+
+    # Save the full set of MediClaims UINs (for G2 filtering in Step 2)
+    mediclaims_uins_df = pd.DataFrame({'uin': list(all_mediclaims_uins)})
+    mediclaims_uins_path = os.path.join(step_out_dir, "all_mediclaims_uins.csv")
+    mediclaims_uins_df.to_csv(mediclaims_uins_path, index=False)
+    logger.info(f"Saved {len(all_mediclaims_uins):,} unique MediClaims UINs to {mediclaims_uins_path}")
+    logger.info("  (Used by Step 2 to filter G2 to patients with MediClaims coverage)")
+    del mediclaims_uins_df
+
     # Save with sidecar report
     from src.utils import save_with_report
     save_with_report(unique_patients, outfile, "Extracted Index Events (IHD)", logger)

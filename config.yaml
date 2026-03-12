@@ -54,6 +54,9 @@ cohort_definitions:
   # Group 3: Naive IHD (IHD with NO COVID in 1 year prior)
   follow_up_days: 365
   washout_period_days: 365 # For Group 3 (Ensure no COVID 1 yr prior)
+  # If true, exclude G2 patients who never appeared in any MediClaims year
+  # (MediClaims = private patients only; COVID registry = all patients)
+  require_mediclaims_coverage: true
 
 # 4. Clinical Definitions
 # -----------------------

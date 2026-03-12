@@ -2,39 +2,45 @@
 11_tier_3_analysis.py
 =====================
 Tier 3 of the Stepwise DAG-Aligned Analysis:
-    Run Tier 2 model within variant-era and vaccination strata.
+    Run Tier 2 model within variant-era strata, with vaccination and severity
+    as covariates (not stratification variables).
 
-    For each stratum:
-        logit(P(IHD=1)) = b0 + b1(Age) + b2(Male) + b3(CCI) + b4..k(Race)
+    Base model per era:
+        logit(P(IHD=1)) = b0 + b1(Age) + b2(Male) + b3(CCI)
+
+    Extended models:
+        + b4(Vaccinated)                           -- vaccination effect
+        + b5(ICU_admitted) + b6(LOS_survivors)      -- severity effect
+        + b7(Vaccinated × ICU)                      -- interaction
 
 Purpose:
-    Determine whether the COVID->IHD association (and the role of comorbidity)
-    varies by pandemic era (Ancestral / Delta / Omicron) and vaccination status.
-
-    This is a STRATIFICATION approach consistent with our DAG: vaccination is
-    an effect modifier, not a confounder, so we stratify rather than adjust.
+    Determine whether the COVID->IHD association varies by pandemic era,
+    and whether vaccination status and COVID severity independently predict
+    post-COVID IHD risk.
 
     Tier 2 established:
       - Overall CCI OR = 1.262 (G1 vs G2)
       - G1 vs G3 CCI OR = 0.704 (COVID-IHD patients are healthier)
-    Tier 3 asks whether these ORs shift across eras and vaccination strata.
+    Tier 3 asks whether these ORs shift across eras and whether vaccination
+    and severity modify IHD risk.
 
 Analysis Components:
     A. Era-stratified logistic regression (G1 vs G2 within each era)
-    B. Vaccination-stratified models within eras (Delta/Omicron only)
+    B. Vaccination as binary covariate (0/1) added to Tier 2 model
     C. Era-stratified G1 vs G3 comparison
-    D. Severity as exploratory covariate (with causal caveat)
-    E. Formal interaction tests (era x CCI)
+    D. Severity as covariates (ICU admission binary, LOS excluding deaths)
+    E. Vaccination × Severity interaction term
+    F. Formal interaction tests (era × CCI)
 
 Input:
     - cohort_tier3_ready.csv (from Step 10)
 
 Output (to data/03_results/step_11_tier3/):
     - era_models/          -- Per-era logistic regression results
-    - vacc_models/         -- Per-era x vaccination results
+    - vaccination_models/  -- Models with vaccination as covariate
     - g1_vs_g3/            -- Era-stratified COVID exposure models
+    - severity_models/     -- Severity covariate models
     - interaction_tests/   -- Formal LR and Wald tests
-    - severity_exploratory/ -- Severity covariate models (with caveats)
     - descriptive/         -- Table 1 by era, by vaccination
     - tier3_summary_report.txt  -- Executive summary
 """
@@ -586,123 +592,154 @@ def run_era_stratified_g1g2(covid, logger, results_dir):
 
 
 # ==============================================================================
-# ANALYSIS COMPONENT B: VACCINATION-STRATIFIED WITHIN ERAS
+# ANALYSIS COMPONENT B: VACCINATION AS BINARY COVARIATE
 # ==============================================================================
 
-def run_vaccination_stratified(covid, logger, results_dir):
-    """Run Tier 2 model within vaccination strata, per era (Delta/Omicron).
+def run_vaccination_covariate(covid, logger, results_dir):
+    """
+    Add vaccination status as a binary covariate (0/1) to the Tier 2 model.
+    Model: logit(IHD) = Age + Male + CCI + Vaccinated
 
-    Vaccination defined as: any dose received within 6 months (183 days)
-    before the COVID infection date. This captures immunologically relevant
-    protection rather than any-time-ever vaccination.
+    This directly tests whether vaccination independently affects IHD risk,
+    rather than splitting into separate models which loses the direct comparison.
+
+    Vaccination defined as: >=1 dose before COVID infection date.
+    Prefers vaccinated_6mo_before_covid if available, falls back to vaccinated_before_covid.
     """
     logger.info("\n" + "=" * 70)
-    logger.info("COMPONENT B: Vaccination-Stratified Models (within Delta & Omicron)")
-    logger.info("  Ancestral era excluded (vaccines not yet available)")
-    logger.info("  Vaccination window: any dose within 6 months before COVID date")
+    logger.info("COMPONENT B: Vaccination as Binary Covariate")
+    logger.info("  Model: logit(IHD) = Age + Male + CCI + Vaccinated")
     logger.info("=" * 70)
 
-    vacc_dir = os.path.join(results_dir, "vacc_models")
+    vacc_dir = os.path.join(results_dir, "vaccination_models")
     ensure_dir(vacc_dir)
 
     # Determine which vaccination column to use
-    # Prefer 6-month window; fall back to any-time-before
     if 'vaccinated_6mo_before_covid' in covid.columns and covid['vaccinated_6mo_before_covid'].notnull().any():
         vacc_col = 'vaccinated_6mo_before_covid'
-        logger.info(f"  Using 6-month vaccination window (vaccinated_6mo_before_covid)")
-    elif 'vaccinated_before_covid' in covid.columns:
+        logger.info(f"  Using 6-month vaccination window ({vacc_col})")
+    elif 'vaccinated_before_covid' in covid.columns and covid['vaccinated_before_covid'].notnull().any():
         vacc_col = 'vaccinated_before_covid'
-        logger.info(f"  Falling back to any-time vaccination (vaccinated_before_covid)")
+        logger.info(f"  Using any-time-before vaccination ({vacc_col})")
     else:
-        vacc_col = None
+        logger.warning("  No vaccination data available. Skipping Component B.")
+        return {}
 
     vacc_results = {}
     vacc_summaries = []
 
-    # Only Delta and Omicron (vaccines were not available in Ancestral)
-    for era in ['Delta', 'Omicron']:
-        era_df = covid[covid['variant_era'] == era].copy()
+    # Prepare data
+    required_cols = ['age', 'gender_male', 'cci_score', vacc_col]
+    vacc_df = covid.dropna(subset=required_cols).copy()
+    vacc_df['vaccinated'] = vacc_df[vacc_col].astype(int)
 
-        if vacc_col is None or vacc_col not in era_df.columns:
-            logger.warning("  No vaccination data available. Skipping.")
+    n_total = len(vacc_df)
+    n_events = vacc_df['outcome'].sum()
+    n_vacc = vacc_df['vaccinated'].sum()
+    logger.info(f"  Pooled: N={n_total:,}, G1={n_events:,}, "
+                f"Vaccinated={n_vacc:,} ({n_vacc/n_total*100:.1f}%)")
+
+    # --- 1. Pooled model: base vs base+vaccination ---
+    formula_base = 'outcome ~ age + gender_male + cci_score'
+    formula_vacc = 'outcome ~ age + gender_male + cci_score + vaccinated'
+
+    model_base, _ = fit_logistic(formula_base, vacc_df, logger, "pooled_base")
+    model_vacc, method = fit_logistic(formula_vacc, vacc_df, logger, "pooled_vacc")
+
+    if model_vacc is not None:
+        or_df = extract_or_table(model_vacc)
+        vacc_results['pooled'] = or_df
+
+        try:
+            auc = roc_auc_score(vacc_df['outcome'], model_vacc.predict(vacc_df))
+        except ValueError:
+            auc = np.nan
+
+        # LR test: does vaccination improve fit?
+        lr_stat = lr_p = np.nan
+        if model_base is not None:
+            lr_stat = -2 * (model_base.llf - model_vacc.llf)
+            lr_p = stats.chi2.sf(lr_stat, df=1)
+            logger.info(f"  LR test (vaccination contribution): chi2={lr_stat:.4f}, p={lr_p:.4e}")
+
+        logger.info(f"  Pooled vaccination model: Apparent AUC={auc:.4f}")
+        for _, row in or_df.iterrows():
+            logger.info(f"    {row['Variable']:25s}  OR={row['OR']:.4f}  "
+                        f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
+                        f"p={row['p_value']:.2e} {row['Significant']}")
+
+        or_df.to_csv(os.path.join(vacc_dir, "pooled_vacc_model_ors.csv"), index=False)
+        with open(os.path.join(vacc_dir, "pooled_vacc_model.txt"), 'w') as f:
+            f.write("VACCINATION AS COVARIATE — POOLED MODEL\n")
+            f.write("=" * 60 + "\n\n")
+            f.write("Model: logit(IHD) = Age + Male + CCI + Vaccinated\n")
+            f.write(f"Vaccination column: {vacc_col}\n")
+            f.write(f"N = {n_total:,}, Events = {n_events:,}\n")
+            f.write(f"Vaccinated: {n_vacc:,} ({n_vacc/n_total*100:.1f}%)\n")
+            f.write(f"Apparent AUC: {auc:.4f}\n")
+            if not np.isnan(lr_stat):
+                f.write(f"LR test vs base: chi2={lr_stat:.4f}, p={lr_p:.4e}\n")
+            f.write("\n")
+            f.write(model_vacc.summary().as_text())
+
+        vacc_summaries.append({
+            'Era': 'Pooled', 'N': n_total, 'Events': n_events,
+            'N_vacc': n_vacc, 'AUC': auc,
+            'Vacc_OR': or_df.loc[or_df['Variable'] == 'vaccinated', 'OR'].values[0] if 'vaccinated' in or_df['Variable'].values else np.nan,
+            'CCI_OR': or_df.loc[or_df['Variable'] == 'cci_score', 'OR'].values[0] if 'cci_score' in or_df['Variable'].values else np.nan,
+            'Status': 'OK',
+        })
+
+    # --- 2. Per-era models with vaccination covariate (Delta/Omicron only) ---
+    for era in ['Delta', 'Omicron']:
+        era_df = vacc_df[vacc_df['variant_era'] == era].copy()
+        n_era = len(era_df)
+        n_ev = era_df['outcome'].sum()
+        n_v = era_df['vaccinated'].sum()
+
+        logger.info(f"\n  --- {era}: N={n_era:,}, G1={n_ev:,}, Vaccinated={n_v:,} ---")
+
+        if n_ev < MIN_EVENTS_FOR_MODEL:
+            logger.warning(f"  SKIPPING: Only {n_ev} events")
             continue
 
-        # Log vaccination coverage for this era
-        n_vacc = (era_df[vacc_col] == 1).sum()
-        n_unvacc = (era_df[vacc_col] == 0).sum()
-        logger.info(f"\n  {era}: Vaccinated={n_vacc:,}, Unvaccinated={n_unvacc:,} "
-                    f"(using {vacc_col})")
+        model_era, method = fit_logistic(formula_vacc, era_df, logger, f"vacc_{era}")
+        if model_era is None:
+            continue
 
-        for vacc_label, vacc_filter in [('Unvaccinated', 0), ('Vaccinated', 1)]:
-            stratum = era_df[era_df[vacc_col] == vacc_filter].copy()
-            # For vaccinated, optionally further split by fully vs partially
-            n_total = len(stratum)
-            n_events = stratum['outcome'].sum()
-            event_rate = n_events / n_total * 100 if n_total > 0 else 0
-            strata_key = f"{era}_{vacc_label}"
+        or_era = extract_or_table(model_era)
+        vacc_results[era] = or_era
 
-            logger.info(f"\n  --- {era} / {vacc_label} ---")
-            logger.info(f"  N={n_total:,} (G1={n_events:,}, rate={event_rate:.2f}%)")
+        try:
+            auc_era = roc_auc_score(era_df['outcome'], model_era.predict(era_df))
+        except ValueError:
+            auc_era = np.nan
 
-            if n_events < MIN_EVENTS_FOR_MODEL:
-                logger.warning(f"  SKIPPING: Only {n_events} events")
-                vacc_summaries.append({
-                    'Era': era, 'Vaccination': vacc_label, 'N': n_total,
-                    'Events': n_events, 'Rate_pct': event_rate,
-                    'Status': 'Skipped (too few events)',
-                })
-                continue
+        logger.info(f"  {era} Apparent AUC: {auc_era:.4f}")
+        for _, row in or_era.iterrows():
+            logger.info(f"    {row['Variable']:25s}  OR={row['OR']:.4f}  "
+                        f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
+                        f"p={row['p_value']:.2e} {row['Significant']}")
 
-            analysis_df = stratum.dropna(subset=['age', 'gender_male', 'cci_score']).copy()
-            if 'race' in analysis_df.columns:
-                analysis_df = analysis_df.dropna(subset=['race']).copy()
+        or_era.to_csv(os.path.join(vacc_dir, f"vacc_{era.lower()}_ors.csv"), index=False)
+        with open(os.path.join(vacc_dir, f"vacc_{era.lower()}.txt"), 'w') as f:
+            f.write(f"VACCINATION AS COVARIATE — {era.upper()} ERA\n")
+            f.write("=" * 60 + "\n\n")
+            f.write(f"N = {n_era:,}, Events = {n_ev:,}, Vaccinated = {n_v:,}\n")
+            f.write(f"Apparent AUC: {auc_era:.4f}\n\n")
+            f.write(model_era.summary().as_text())
 
-            label = f"G1G2_{era}_{vacc_label}"
-            formula, _, _ = build_formula('outcome', analysis_df, logger, label)
-
-            model, method = fit_logistic(formula, analysis_df, logger, label)
-
-            if model is None:
-                vacc_summaries.append({
-                    'Era': era, 'Vaccination': vacc_label, 'N': n_total,
-                    'Events': n_events, 'Rate_pct': event_rate,
-                    'Status': 'Model failed',
-                })
-                continue
-
-            or_df = extract_or_table(model)
-            vacc_results[strata_key] = or_df
-
-            try:
-                auc = roc_auc_score(analysis_df['outcome'], model.predict(analysis_df))
-            except ValueError:
-                auc = np.nan
-
-            logger.info(f"  Apparent AUC: {auc:.4f} (training-set), Pseudo R2: {model.prsquared:.6f}")
-            for _, row in or_df.iterrows():
-                logger.info(f"    {row['Variable']:20s}  OR={row['OR']:.4f}  "
-                            f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f}) "
-                            f"p={row['p_value']:.2e} {row['Significant']}")
-
-            or_df.to_csv(os.path.join(vacc_dir, f"tier3_{era.lower()}_{vacc_label.lower()}_ors.csv"), index=False)
-
-            with open(os.path.join(vacc_dir, f"tier3_{era.lower()}_{vacc_label.lower()}.txt"), 'w') as f:
-                f.write(f"TIER 3 - {era.upper()} / {vacc_label.upper()}\n")
-                f.write("=" * 60 + "\n\n")
-                f.write(f"N = {len(analysis_df):,}\n")
-                f.write(f"Apparent AUC: {auc:.4f} (training-set)\n\n")
-                f.write(model.summary().as_text())
-
-            vacc_summaries.append({
-                'Era': era, 'Vaccination': vacc_label, 'N': n_total,
-                'Events': n_events, 'Rate_pct': event_rate, 'AUC': auc,
-                'CCI_OR': or_df.loc[or_df['Variable'] == 'cci_score', 'OR'].values[0] if 'cci_score' in or_df['Variable'].values else np.nan,
-                'Status': 'OK',
-            })
+        vacc_summaries.append({
+            'Era': era, 'N': n_era, 'Events': n_ev,
+            'N_vacc': n_v, 'AUC': auc_era,
+            'Vacc_OR': or_era.loc[or_era['Variable'] == 'vaccinated', 'OR'].values[0] if 'vaccinated' in or_era['Variable'].values else np.nan,
+            'CCI_OR': or_era.loc[or_era['Variable'] == 'cci_score', 'OR'].values[0] if 'cci_score' in or_era['Variable'].values else np.nan,
+            'Status': 'OK',
+        })
 
     summary_df = pd.DataFrame(vacc_summaries)
-    summary_df.to_csv(os.path.join(vacc_dir, "vacc_model_summary.csv"), index=False)
-    logger.info(f"\n  Vaccination model summary:\n{summary_df.to_string(index=False)}")
+    summary_df.to_csv(os.path.join(vacc_dir, "vacc_covariate_summary.csv"), index=False)
+    logger.info(f"\n  Vaccination covariate summary:\n{summary_df.to_string(index=False)}")
 
     return vacc_results
 
@@ -920,182 +957,185 @@ def run_era_stratified_g1g3(df_all, logger, results_dir):
 
 
 # ==============================================================================
-# ANALYSIS COMPONENT D: SEVERITY AS EXPLORATORY COVARIATE
+# ANALYSIS COMPONENT D: SEVERITY AS COVARIATES (LOS + ICU)
 # ==============================================================================
 
-def run_severity_exploratory(covid, logger, results_dir):
+def run_severity_models(covid, logger, results_dir):
     """
-    Add severity as a covariate — EXPLORATORY ONLY.
-    Severity is a potential mediator (COVID -> severity -> IHD), so including it
-    may block part of the causal path. Results should be reported with this caveat.
+    Model severity using LOS and ICU admission as proper covariates.
+
+    Key design decisions:
+    - LOS comparisons EXCLUDE in-hospital deaths (their LOS is truncated by death)
+    - ICU admission is a binary covariate (cleanest acute severity marker)
+    - LOS is used as continuous covariate for survivors only
+
+    Models:
+    1. Base + ICU (binary): does ICU admission predict IHD?
+    2. Base + LOS (survivors only): does length of stay predict IHD?
+    3. Base + ICU + LOS_survivors: combined severity model
+
+    CAUTION: Severity is a potential mediator (COVID -> severity -> IHD).
+    Results should be interpreted with this caveat.
     """
     logger.info("\n" + "=" * 70)
-    logger.info("COMPONENT D: Severity as Exploratory Covariate (CAUSAL CAVEAT)")
-    logger.info("  WARNING: Severity may be a mediator. Results are exploratory.")
+    logger.info("COMPONENT D: Severity as Covariates (ICU + LOS)")
+    logger.info("  LOS excludes in-hospital deaths (truncated by death)")
+    logger.info("  CAUTION: Severity may be a mediator on COVID -> IHD path")
     logger.info("=" * 70)
 
-    sev_dir = os.path.join(results_dir, "severity_exploratory")
+    sev_dir = os.path.join(results_dir, "severity_models")
     ensure_dir(sev_dir)
-
-    if 'severity_category' not in covid.columns:
-        logger.warning("  No severity_category column. Skipping.")
-        return
 
     covid = covid.copy()
 
-    # Only patients with known severity (exclude Unknown)
-    known_sevs = ['Mild', 'Moderate', 'Severe', 'Critical']
-    sev_df = covid[covid['severity_category'].isin(known_sevs)].dropna(
-        subset=['age', 'gender_male', 'cci_score']
-    ).copy()
+    # --- Derive ICU admission binary ---
+    icu_col = None
+    for candidate in ['DaysInICU', 'days_in_icu']:
+        if candidate in covid.columns:
+            icu_col = candidate
+            break
 
-    n_events = sev_df['outcome'].sum()
-    logger.info(f"  Patients with known severity: {len(sev_df):,} (G1={n_events:,})")
-    logger.info(f"  Severity distribution:\n{sev_df['severity_category'].value_counts().to_string()}")
+    has_icu = False
+    if icu_col:
+        covid['icu_admitted'] = (pd.to_numeric(covid[icu_col], errors='coerce').fillna(0) > 0).astype(int)
+        has_icu = True
+        n_icu = covid['icu_admitted'].sum()
+        logger.info(f"  ICU admissions: {n_icu:,} ({n_icu/len(covid)*100:.2f}%)")
+    else:
+        logger.warning("  No ICU column found.")
 
-    if n_events < MIN_EVENTS_FOR_MODEL:
-        logger.warning(f"  Too few events for severity model. Skipping.")
+    # --- Derive LOS for survivors (exclude in-hospital deaths) ---
+    has_los = False
+    if 'LOS' in covid.columns:
+        covid['LOS_num'] = pd.to_numeric(covid['LOS'], errors='coerce')
+
+        # Identify deceased patients
+        deceased_col = None
+        for candidate in ['Deceased', 'deceased']:
+            if candidate in covid.columns:
+                deceased_col = candidate
+                break
+
+        if deceased_col:
+            # Deceased can be 1, 'Y', 'YES', 'True', etc.
+            deceased_vals = covid[deceased_col].astype(str).str.strip().str.upper()
+            covid['is_deceased'] = deceased_vals.isin(['1', 'Y', 'YES', 'TRUE', '1.0'])
+            n_deceased = covid['is_deceased'].sum()
+            logger.info(f"  In-hospital deaths: {n_deceased:,}")
+        else:
+            covid['is_deceased'] = False
+            logger.info("  No Deceased column — using all LOS values")
+
+        # LOS for survivors only (exclude deaths whose LOS is truncated)
+        covid['los_survivors'] = covid['LOS_num'].copy()
+        covid.loc[covid['is_deceased'], 'los_survivors'] = np.nan
+
+        survivors_with_los = covid['los_survivors'].notnull() & (covid['los_survivors'] >= 0)
+        n_los_valid = survivors_with_los.sum()
+        has_los = n_los_valid > 0
+
+        if has_los:
+            los_valid = covid.loc[survivors_with_los, 'los_survivors']
+            logger.info(f"  LOS (survivors only): N={n_los_valid:,}, "
+                        f"mean={los_valid.mean():.1f}, median={los_valid.median():.0f}, "
+                        f"IQR={los_valid.quantile(0.25):.0f}-{los_valid.quantile(0.75):.0f}")
+    else:
+        logger.warning("  No LOS column found.")
+
+    # Check we have enough data for modelling
+    base_cols = ['age', 'gender_male', 'cci_score']
+    base_df = covid.dropna(subset=base_cols).copy()
+
+    if not has_icu and not has_los:
+        logger.warning("  No severity data available. Skipping Component D.")
         return
 
-    # --- Primary: Dummy variables (reference = Mild) ---
-    # Each severity level gets its own OR — no equal-interval assumption
-    formula_dummy = ('outcome ~ age + gender_male + cci_score '
-                     '+ C(severity_category, Treatment(reference="Mild"))')
-    model, method = fit_logistic(formula_dummy, sev_df, logger, "severity_dummy_model")
+    # === Model 1: Base + ICU (binary) ===
+    if has_icu:
+        logger.info("\n  --- Model D1: Base + ICU Admission ---")
+        icu_df = base_df.dropna(subset=['icu_admitted']).copy()
+        n_events = icu_df['outcome'].sum()
+        n_icu_m = icu_df['icu_admitted'].sum()
+        logger.info(f"  N={len(icu_df):,}, G1={n_events:,}, ICU={n_icu_m:,}")
 
-    if model is not None:
-        or_df = extract_or_table(model)
+        if n_events >= MIN_EVENTS_FOR_MODEL and n_icu_m >= 5:
+            formula = 'outcome ~ age + gender_male + cci_score + icu_admitted'
+            model, _ = fit_logistic(formula, icu_df, logger, "D1_icu")
 
-        logger.info("\n  Severity model (dummy variables, ref=Mild):")
-        for _, row in or_df.iterrows():
-            logger.info(f"    {row['Variable']:45s}  OR={row['OR']:.4f}  "
-                        f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
-                        f"p={row['p_value']:.2e} {row['Significant']}")
+            if model is not None:
+                or_df = extract_or_table(model)
+                _log_and_save_model(or_df, model, icu_df, sev_dir, "icu_model",
+                                    "BASE + ICU ADMISSION", logger)
 
-        or_df.to_csv(os.path.join(sev_dir, "severity_dummy_model_ors.csv"), index=False)
+    # === Model 2: Base + LOS (survivors only) ===
+    if has_los:
+        logger.info("\n  --- Model D2: Base + LOS (survivors, excluding deaths) ---")
+        los_df = base_df[base_df['los_survivors'].notnull() & (base_df['los_survivors'] >= 0)].copy()
+        n_events = los_df['outcome'].sum()
+        logger.info(f"  N={len(los_df):,}, G1={n_events:,}")
 
-        with open(os.path.join(sev_dir, "severity_dummy_model.txt"), 'w') as f:
-            f.write("EXPLORATORY: SEVERITY AS COVARIATE (DUMMY VARIABLES)\n")
-            f.write("=" * 60 + "\n\n")
-            f.write("CAUTION: Severity (LOS, ICU, O2, Deceased) is a potential MEDIATOR\n")
-            f.write("on the causal path: COVID -> Severity -> IHD.\n")
-            f.write("Including it may block the causal pathway and UNDERESTIMATE\n")
-            f.write("the total effect of COVID on IHD.\n\n")
-            f.write("This model answers a different question:\n")
-            f.write("  'Conditional on COVID severity, does comorbidity still predict IHD?'\n\n")
-            f.write("Severity encoding: Dummy variables with Mild as reference.\n")
-            f.write("Each level has its own OR (no equal-interval assumption).\n\n")
-            f.write(f"N = {len(sev_df):,} (patients with known severity, excluding Unknown)\n\n")
-            f.write(model.summary().as_text())
+        if n_events >= MIN_EVENTS_FOR_MODEL:
+            formula = 'outcome ~ age + gender_male + cci_score + los_survivors'
+            model, _ = fit_logistic(formula, los_df, logger, "D2_los")
 
-    # --- Secondary: Binary ICU indicator ---
-    # ICU admission is the cleanest marker of acute cardiac stress
-    if 'DaysInICU' in covid.columns or 'days_in_icu' in covid.columns:
-        icu_col = 'DaysInICU' if 'DaysInICU' in covid.columns else 'days_in_icu'
-        sev_df['icu_admission'] = (pd.to_numeric(sev_df[icu_col], errors='coerce') > 0).astype(int)
+            if model is not None:
+                or_df = extract_or_table(model)
+                _log_and_save_model(or_df, model, los_df, sev_dir, "los_survivors_model",
+                                    "BASE + LOS (SURVIVORS ONLY)", logger)
 
-        n_icu = sev_df['icu_admission'].sum()
-        logger.info(f"\n  Binary ICU model: {n_icu:,} ICU admissions in severity subset")
+    # === Model 3: Combined ICU + LOS ===
+    if has_icu and has_los:
+        logger.info("\n  --- Model D3: Base + ICU + LOS (survivors) ---")
+        combined_df = base_df.dropna(subset=['icu_admitted']).copy()
+        combined_df = combined_df[combined_df['los_survivors'].notnull() & (combined_df['los_survivors'] >= 0)].copy()
+        n_events = combined_df['outcome'].sum()
+        logger.info(f"  N={len(combined_df):,}, G1={n_events:,}")
 
-        if n_icu >= 10:
-            formula_icu = 'outcome ~ age + gender_male + cci_score + icu_admission'
-            model_icu, _ = fit_logistic(formula_icu, sev_df, logger, "severity_icu_binary")
+        if n_events >= MIN_EVENTS_FOR_MODEL:
+            formula = 'outcome ~ age + gender_male + cci_score + icu_admitted + los_survivors'
+            model, _ = fit_logistic(formula, combined_df, logger, "D3_combined")
 
-            if model_icu is not None:
-                or_icu = extract_or_table(model_icu)
-                logger.info("  Binary ICU model results:")
-                for _, row in or_icu.iterrows():
-                    logger.info(f"    {row['Variable']:25s}  OR={row['OR']:.4f}  "
-                                f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
-                                f"p={row['p_value']:.2e} {row['Significant']}")
-                or_icu.to_csv(os.path.join(sev_dir, "severity_icu_binary_ors.csv"), index=False)
-    else:
-        logger.info("  No ICU column available for binary ICU model.")
+            if model is not None:
+                or_df = extract_or_table(model)
+                _log_and_save_model(or_df, model, combined_df, sev_dir, "icu_los_combined_model",
+                                    "BASE + ICU + LOS (SURVIVORS)", logger)
 
-    # Also run dummy model by era
-    for era in ERA_ORDER:
-        era_sev = sev_df[sev_df['variant_era'] == era].copy()
-        n_ev = era_sev['outcome'].sum()
-        if n_ev < MIN_EVENTS_FOR_MODEL:
-            continue
-        # Check severity levels present in this era
-        era_sevs = era_sev['severity_category'].unique()
-        if len(era_sevs) < 2:
-            logger.info(f"  {era}: Only 1 severity level present, skipping era-specific model")
-            continue
-        model_era, _ = fit_logistic(formula_dummy, era_sev, logger, f"sev_{era}")
-        if model_era:
-            or_era = extract_or_table(model_era)
-            or_era.to_csv(os.path.join(sev_dir, f"severity_{era.lower()}_dummy_ors.csv"), index=False)
-
-    # --- LOS as continuous covariate ---
-    logger.info("\n  --- LOS as Continuous Covariate ---")
-    if 'LOS' in covid.columns:
-        los_df = covid.dropna(subset=['age', 'gender_male', 'cci_score', 'LOS']).copy()
-        los_df['LOS'] = pd.to_numeric(los_df['LOS'], errors='coerce')
-        los_df = los_df[los_df['LOS'] >= 0].copy()
-        n_los_events = los_df['outcome'].sum()
-
-        logger.info(f"  Patients with LOS data: {len(los_df):,} (G1={n_los_events:,})")
-        logger.info(f"  LOS distribution: mean={los_df['LOS'].mean():.1f}, "
-                    f"median={los_df['LOS'].median():.0f}, "
-                    f"IQR={los_df['LOS'].quantile(0.25):.0f}-{los_df['LOS'].quantile(0.75):.0f}")
-
-        if n_los_events >= MIN_EVENTS_FOR_MODEL:
-            formula_los = 'outcome ~ age + gender_male + cci_score + LOS'
-            model_los, _ = fit_logistic(formula_los, los_df, logger, "los_continuous")
-
-            if model_los is not None:
-                or_los = extract_or_table(model_los)
-                logger.info("  LOS continuous model results:")
-                for _, row in or_los.iterrows():
-                    logger.info(f"    {row['Variable']:25s}  OR={row['OR']:.4f}  "
-                                f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
-                                f"p={row['p_value']:.2e} {row['Significant']}")
-                or_los.to_csv(os.path.join(sev_dir, "los_continuous_model_ors.csv"), index=False)
-
-                with open(os.path.join(sev_dir, "los_continuous_model.txt"), 'w') as f:
-                    f.write("EXPLORATORY: LOS AS CONTINUOUS COVARIATE\n")
-                    f.write("=" * 60 + "\n\n")
-                    f.write("CAUTION: LOS is a severity indicator and potential MEDIATOR.\n\n")
-                    f.write(f"N = {len(los_df):,} (G1={n_los_events:,})\n")
-                    f.write(f"LOS: mean={los_df['LOS'].mean():.1f}, "
-                            f"median={los_df['LOS'].median():.0f}\n\n")
-                    f.write(model_los.summary().as_text())
-
-        # LOS by group and era descriptive table
+    # === LOS descriptive table: by group × era, excluding deaths ===
+    if has_los:
+        logger.info("\n  --- LOS Descriptive Table (survivors only, excluding deaths) ---")
         los_desc = []
         for grp in ['Group 1', 'Group 2']:
             for era in ERA_ORDER:
-                sub = los_df[(los_df['group'] == grp) & (los_df['variant_era'] == era)]
+                sub = covid[(covid['group'] == grp) & (covid['variant_era'] == era)
+                            & covid['los_survivors'].notnull() & (covid['los_survivors'] >= 0)]
                 if len(sub) > 0:
                     los_desc.append({
-                        'Group': grp, 'Era': era, 'N': len(sub),
-                        'LOS_mean': sub['LOS'].mean(),
-                        'LOS_median': sub['LOS'].median(),
-                        'LOS_q25': sub['LOS'].quantile(0.25),
-                        'LOS_q75': sub['LOS'].quantile(0.75),
-                        'LOS_max': sub['LOS'].max(),
+                        'Group': grp, 'Era': era, 'N_survivors': len(sub),
+                        'N_deaths_excluded': ((covid['group'] == grp) & (covid['variant_era'] == era)
+                                              & covid['is_deceased']).sum(),
+                        'LOS_mean': sub['los_survivors'].mean(),
+                        'LOS_median': sub['los_survivors'].median(),
+                        'LOS_q25': sub['los_survivors'].quantile(0.25),
+                        'LOS_q75': sub['los_survivors'].quantile(0.75),
+                        'LOS_max': sub['los_survivors'].max(),
                     })
         if los_desc:
             los_desc_df = pd.DataFrame(los_desc)
-            los_desc_df.to_csv(os.path.join(sev_dir, "los_by_group_era.csv"), index=False)
-            logger.info(f"\n  LOS by Group x Era:\n{los_desc_df.to_string(index=False)}")
-    else:
-        logger.info("  No LOS column available.")
+            los_desc_df.to_csv(os.path.join(sev_dir, "los_survivors_by_group_era.csv"), index=False)
+            logger.info(f"\n  LOS (survivors) by Group x Era:\n{los_desc_df.to_string(index=False)}")
 
-    # --- Severity distribution descriptive table ---
-    logger.info("\n  --- Severity Distribution by Group x Era ---")
+    # === Severity distribution descriptive table ===
     if 'severity_category' in covid.columns:
+        logger.info("\n  --- Severity Distribution by Group x Era ---")
         sev_desc = covid.groupby(['group', 'variant_era', 'severity_category']).size().reset_index(name='count')
         sev_pivot = sev_desc.pivot_table(
             index=['group', 'variant_era'], columns='severity_category',
             values='count', fill_value=0
         ).reset_index()
         sev_pivot.to_csv(os.path.join(sev_dir, "severity_distribution_by_group_era.csv"), index=False)
-        logger.info(f"\n  Severity distribution:\n{sev_pivot.to_string(index=False)}")
+        logger.info(f"\n{sev_pivot.to_string(index=False)}")
 
-        # Event rate by severity category
+        # Event rate by severity
         sev_event_rates = []
         for sev_cat in ['Mild', 'Moderate', 'Severe', 'Critical', 'Unknown']:
             sub = covid[covid['severity_category'] == sev_cat]
@@ -1110,6 +1150,165 @@ def run_severity_exploratory(covid, logger, results_dir):
             sev_rate_df = pd.DataFrame(sev_event_rates)
             sev_rate_df.to_csv(os.path.join(sev_dir, "event_rate_by_severity.csv"), index=False)
             logger.info(f"\n  Event rate by severity:\n{sev_rate_df.to_string(index=False)}")
+
+
+def _log_and_save_model(or_df, model, data, out_dir, name, title, logger):
+    """Helper to log OR table and save model outputs."""
+    try:
+        auc = roc_auc_score(data['outcome'], model.predict(data))
+    except ValueError:
+        auc = np.nan
+
+    logger.info(f"  {title}: Apparent AUC={auc:.4f}")
+    for _, row in or_df.iterrows():
+        logger.info(f"    {row['Variable']:30s}  OR={row['OR']:.4f}  "
+                    f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
+                    f"p={row['p_value']:.2e} {row['Significant']}")
+
+    or_df.to_csv(os.path.join(out_dir, f"{name}_ors.csv"), index=False)
+    with open(os.path.join(out_dir, f"{name}.txt"), 'w') as f:
+        f.write(f"{title}\n")
+        f.write("=" * 60 + "\n\n")
+        f.write("CAUTION: Severity indicators are potential MEDIATORS on the\n")
+        f.write("causal path: COVID -> Severity -> IHD. Including them may\n")
+        f.write("underestimate the total effect of COVID on IHD.\n\n")
+        f.write(f"N = {len(data):,}, Events = {data['outcome'].sum():,}\n")
+        f.write(f"Apparent AUC: {auc:.4f}\n\n")
+        f.write(model.summary().as_text())
+
+
+# ==============================================================================
+# ANALYSIS COMPONENT E: VACCINATION × SEVERITY INTERACTION
+# ==============================================================================
+
+def run_vacc_severity_interaction(covid, logger, results_dir):
+    """
+    Test whether vaccination status modifies the effect of COVID severity on IHD.
+    Model: logit(IHD) = Age + Male + CCI + Vaccinated + ICU + Vaccinated × ICU
+
+    If the interaction is significant, it means the effect of severe COVID on
+    IHD risk differs between vaccinated and unvaccinated patients.
+    """
+    logger.info("\n" + "=" * 70)
+    logger.info("COMPONENT E: Vaccination × Severity Interaction")
+    logger.info("  Model: logit(IHD) = Age + Male + CCI + Vacc + ICU + Vacc×ICU")
+    logger.info("=" * 70)
+
+    int_dir = os.path.join(results_dir, "vacc_severity_interaction")
+    ensure_dir(int_dir)
+
+    # Need both vaccination and severity data
+    vacc_col = None
+    for candidate in ['vaccinated_6mo_before_covid', 'vaccinated_before_covid']:
+        if candidate in covid.columns and covid[candidate].notnull().any():
+            vacc_col = candidate
+            break
+
+    if vacc_col is None:
+        logger.warning("  No vaccination data. Skipping.")
+        return
+
+    # Derive ICU if not already done
+    if 'icu_admitted' not in covid.columns:
+        for icu_candidate in ['DaysInICU', 'days_in_icu']:
+            if icu_candidate in covid.columns:
+                covid = covid.copy()
+                covid['icu_admitted'] = (pd.to_numeric(covid[icu_candidate], errors='coerce').fillna(0) > 0).astype(int)
+                break
+
+    if 'icu_admitted' not in covid.columns:
+        logger.warning("  No ICU data. Skipping.")
+        return
+
+    # Prepare data
+    required = ['age', 'gender_male', 'cci_score', vacc_col, 'icu_admitted']
+    int_df = covid.dropna(subset=required).copy()
+    int_df['vaccinated'] = int_df[vacc_col].astype(int)
+
+    n_total = len(int_df)
+    n_events = int_df['outcome'].sum()
+    n_vacc = int_df['vaccinated'].sum()
+    n_icu = int_df['icu_admitted'].sum()
+    n_vacc_icu = ((int_df['vaccinated'] == 1) & (int_df['icu_admitted'] == 1)).sum()
+
+    logger.info(f"  N={n_total:,}, G1={n_events:,}")
+    logger.info(f"  Vaccinated={n_vacc:,}, ICU={n_icu:,}, Vacc+ICU={n_vacc_icu:,}")
+
+    if n_events < MIN_EVENTS_FOR_MODEL:
+        logger.warning("  Too few events. Skipping.")
+        return
+
+    # Reduced model (no interaction)
+    formula_red = 'outcome ~ age + gender_male + cci_score + vaccinated + icu_admitted'
+    model_red, _ = fit_logistic(formula_red, int_df, logger, "vacc_sev_reduced")
+
+    # Full model (with interaction)
+    formula_full = ('outcome ~ age + gender_male + cci_score + vaccinated + icu_admitted '
+                    '+ vaccinated:icu_admitted')
+    model_full, _ = fit_logistic(formula_full, int_df, logger, "vacc_sev_full")
+
+    if model_red is None or model_full is None:
+        logger.error("  Model fitting failed.")
+        return
+
+    # LR test for interaction
+    lr_stat = -2 * (model_red.llf - model_full.llf)
+    lr_p = stats.chi2.sf(lr_stat, df=1)
+
+    logger.info(f"\n  LR test (Vacc×ICU interaction): chi2={lr_stat:.4f}, p={lr_p:.4e}")
+    if lr_p < 0.05:
+        logger.info("    SIGNIFICANT: Vaccination modifies the ICU->IHD relationship")
+    else:
+        logger.info("    NOT SIGNIFICANT: No evidence of Vacc×ICU interaction")
+
+    # Log full model
+    or_full = extract_or_table(model_full)
+    or_red = extract_or_table(model_red)
+
+    logger.info("\n  Full interaction model:")
+    for _, row in or_full.iterrows():
+        logger.info(f"    {row['Variable']:35s}  OR={row['OR']:.4f}  "
+                    f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
+                    f"p={row['p_value']:.2e} {row['Significant']}")
+
+    or_full.to_csv(os.path.join(int_dir, "vacc_severity_interaction_ors.csv"), index=False)
+    or_red.to_csv(os.path.join(int_dir, "vacc_severity_reduced_ors.csv"), index=False)
+
+    with open(os.path.join(int_dir, "vacc_severity_interaction.txt"), 'w') as f:
+        f.write("VACCINATION × SEVERITY (ICU) INTERACTION MODEL\n")
+        f.write("=" * 60 + "\n\n")
+        f.write("Question: Does vaccination modify the effect of severe COVID\n")
+        f.write("(ICU admission) on subsequent IHD risk?\n\n")
+        f.write(f"Vaccination column: {vacc_col}\n")
+        f.write(f"N = {n_total:,}, Events = {n_events:,}\n")
+        f.write(f"Vaccinated: {n_vacc:,}, ICU: {n_icu:,}, Both: {n_vacc_icu:,}\n\n")
+        f.write(f"LR test (interaction): chi2={lr_stat:.4f}, df=1, p={lr_p:.4e}\n")
+        sig_text = "SIGNIFICANT" if lr_p < 0.05 else "NOT SIGNIFICANT"
+        f.write(f"Result: {sig_text}\n\n")
+        f.write("--- Full Interaction Model ---\n\n")
+        f.write(model_full.summary().as_text())
+        f.write("\n\n--- Reduced Model (no interaction) ---\n\n")
+        f.write(model_red.summary().as_text())
+
+    # Also test with LOS (survivors) if available
+    if 'los_survivors' in covid.columns:
+        los_int_df = int_df[int_df['los_survivors'].notnull() & (int_df['los_survivors'] >= 0)].copy()
+        n_ev_los = los_int_df['outcome'].sum()
+
+        if n_ev_los >= MIN_EVENTS_FOR_MODEL:
+            logger.info("\n  --- Vaccination × LOS (survivors) interaction ---")
+            formula_los_full = ('outcome ~ age + gender_male + cci_score + vaccinated '
+                                '+ los_survivors + vaccinated:los_survivors')
+            model_los, _ = fit_logistic(formula_los_full, los_int_df, logger, "vacc_los_interaction")
+
+            if model_los is not None:
+                or_los = extract_or_table(model_los)
+                logger.info("  Vacc × LOS interaction model:")
+                for _, row in or_los.iterrows():
+                    logger.info(f"    {row['Variable']:35s}  OR={row['OR']:.4f}  "
+                                f"({row['Lower_CI']:.4f}-{row['Upper_CI']:.4f})  "
+                                f"p={row['p_value']:.2e} {row['Significant']}")
+                or_los.to_csv(os.path.join(int_dir, "vacc_los_interaction_ors.csv"), index=False)
 
 
 # ==============================================================================
@@ -1423,16 +1622,19 @@ def run_step_11(config):
     # A. Era-stratified G1 vs G2
     era_results, era_models = run_era_stratified_g1g2(covid, logger, results_dir)
 
-    # B. Vaccination-stratified within eras
-    vacc_results = run_vaccination_stratified(covid, logger, results_dir)
+    # B. Vaccination as binary covariate
+    vacc_results = run_vaccination_covariate(covid, logger, results_dir)
 
     # C. Era-stratified G1 vs G3
     g1g3_results = run_era_stratified_g1g3(df_all, logger, results_dir)
 
-    # D. Severity as exploratory covariate
-    run_severity_exploratory(covid, logger, results_dir)
+    # D. Severity as covariates (ICU + LOS excluding deaths)
+    run_severity_models(covid, logger, results_dir)
 
-    # E. Interaction tests
+    # E. Vaccination × Severity interaction
+    run_vacc_severity_interaction(covid, logger, results_dir)
+
+    # F. Era interaction tests (era × CCI)
     run_interaction_tests(covid, era_models, logger, results_dir)
 
     # F. Sensitivity: Race as covariate
@@ -1452,7 +1654,7 @@ def run_step_11(config):
     summary_lines.append("TIER 3 ANALYSIS: EXECUTIVE SUMMARY")
     summary_lines.append("=" * 70)
     summary_lines.append("")
-    summary_lines.append("MODEL: logit(IHD) = Age + Male + CCI + Race, stratified by variant era & vaccination")
+    summary_lines.append("MODEL: logit(IHD) = Age + Male + CCI [+ Vaccinated] [+ ICU/LOS], stratified by variant era")
     summary_lines.append(f"TOTAL COVID COHORT: {len(covid):,} (G1={n_g1:,}, G2={n_g2:,})")
     summary_lines.append(f"OVERALL EVENT RATE: {n_g1/len(covid)*100:.3f}%")
     summary_lines.append("")

@@ -190,7 +190,34 @@ def run_step_2(config):
         return 'Unknown'
 
     merged['group'] = merged.apply(classify, axis=1)
-    
+
+    # ---- MediClaims Coverage Filter (for G2) ----
+    # COVID dataset covers ALL patients, but MediClaims is private patients only.
+    # A COVID patient who never appeared in ANY MediClaims year could never have
+    # been observed for IHD — they should not be in G2.
+    require_mc = config.get('cohort_definitions', {}).get('require_mediclaims_coverage', False)
+    if require_mc:
+        mc_uins_path = os.path.join(processed_dir, "step_1_extraction", "all_mediclaims_uins.csv")
+        if os.path.exists(mc_uins_path):
+            mc_uins = set(pd.read_csv(mc_uins_path)['uin'].unique())
+            logger.info(f"MediClaims coverage filter ENABLED: {len(mc_uins):,} patients in MediClaims")
+
+            g2_mask = merged['group'] == 'Group 2'
+            g2_no_mc = g2_mask & (~merged['uin'].isin(mc_uins))
+            n_removed = g2_no_mc.sum()
+
+            # Mark them as excluded (not assigned to any group)
+            merged.loc[g2_no_mc, 'group'] = 'Excluded_No_MediClaims'
+
+            logger.info(f"  G2 before filter: {g2_mask.sum():,}")
+            logger.info(f"  G2 removed (no MediClaims): {n_removed:,}")
+            logger.info(f"  G2 after filter: {(merged['group'] == 'Group 2').sum():,}")
+        else:
+            logger.warning(f"MediClaims coverage filter requested but {mc_uins_path} not found. "
+                           "Run Step 1 first. Skipping filter.")
+    else:
+        logger.info("MediClaims coverage filter DISABLED (set require_mediclaims_coverage: true to enable)")
+
     # Fill Demographics for Group 3 (Naive IHD) who came from IHD registry (no age/gender there usually)
     # We need to fetch from SingCLOUD
     missing_demo_mask = (merged['group'] == 'Group 3') & (merged['age'].isna())
